@@ -1,0 +1,367 @@
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/EpisodeScreen.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/EpisodeScreen.kt
+index 8b545e8d22f27618e1d05106548c959bca536229..414077133aa717680c67ea5c25c5506680430237 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/EpisodeScreen.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/EpisodeScreen.kt
+@@ -221,6 +221,7 @@ private fun EpisodeScreenLayout(
+                     }
+                     ItemButtonsBar(
+                         item = episode,
++                        canPlay = !isOfflineMode || episode.sources.any { it.type == FindroidSourceType.LOCAL },
+                         downloaderState = downloaderState,
+                         onPlayClick = { startFromBeginning ->
+                             onAction(EpisodeAction.Play(startFromBeginning = startFromBeginning))
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/MovieScreen.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/MovieScreen.kt
+index 7ce995a2ecb496cbc37e44b6e300d2e31daa567e..0ed8f6befcd380dd34f5f4041ad4add9f70af4ea 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/MovieScreen.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/MovieScreen.kt
+@@ -218,6 +218,7 @@ private fun MovieScreenLayout(
+                     }
+                     ItemButtonsBar(
+                         item = movie,
++                        canPlay = !isOfflineMode || movie.sources.any { it.type == FindroidSourceType.LOCAL },
+                         downloaderState = downloaderState,
+                         onPlayClick = { startFromBeginning ->
+                             onAction(MovieAction.Play(startFromBeginning = startFromBeginning))
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/settings/SettingsScreen.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/settings/SettingsScreen.kt
+index d1b290dd1d304441bb33d2b8bb6906cf9f3ef9ea..6c6b69886afed0289542c000d3acddca98fb35ba 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/settings/SettingsScreen.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/settings/SettingsScreen.kt
+@@ -1,9 +1,12 @@
+ package dev.jdtech.jellyfin.presentation.settings
+ 
+ import android.app.Activity
++import android.content.Intent
+ import android.app.UiModeManager
+ import android.os.Build
+ import androidx.annotation.StringRes
++import androidx.activity.compose.rememberLauncherForActivityResult
++import androidx.activity.result.contract.ActivityResultContracts
+ import androidx.appcompat.app.AppCompatDelegate
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.PaddingValues
+@@ -16,6 +19,7 @@ import androidx.compose.foundation.lazy.items
+ import androidx.compose.material3.ExperimentalMaterial3Api
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
++import androidx.compose.material3.OutlinedButton
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Scaffold
+ import androidx.compose.material3.Text
+@@ -63,6 +67,20 @@ fun SettingsScreen(
+     viewModel: SettingsViewModel = hiltViewModel(),
+ ) {
+     val context = LocalContext.current
++    val folderPicker =
++        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
++            if (uri != null) {
++                try {
++                    context.contentResolver.takePersistableUriPermission(
++                        uri,
++                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
++                    )
++                    viewModel.setLocalMediaFolder(uri.toString())
++                } catch (e: Exception) {
++                    Timber.e(e, "Unable to persist local media folder permission")
++                }
++            }
++        }
+ 
+     val state by viewModel.state.collectAsStateWithLifecycle()
+ 
+@@ -122,6 +140,7 @@ fun SettingsScreen(
+     SettingsScreenLayout(
+         title = indexes.last(),
+         state = state,
++        onSelectLocalFolder = { folderPicker.launch(null) },
+         onAction = { action ->
+             when (action) {
+                 is SettingsAction.OnBackClick -> navigateBack()
+@@ -139,6 +158,7 @@ fun SettingsScreen(
+ private fun SettingsScreenLayout(
+     @StringRes title: Int,
+     state: SettingsState,
++    onSelectLocalFolder: () -> Unit = {},
+     onAction: (SettingsAction) -> Unit,
+ ) {
+     val contentPadding = PaddingValues(all = MaterialTheme.spacings.default)
+@@ -171,6 +191,14 @@ private fun SettingsScreenLayout(
+             verticalArrangement = Arrangement.spacedBy(MaterialTheme.spacings.medium),
+             horizontalAlignment = Alignment.CenterHorizontally,
+         ) {
++            item {
++                OutlinedButton(
++                    onClick = onSelectLocalFolder,
++                    modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
++                ) {
++                    Text("Lokalen Medienordner auswählen")
++                }
++            }
+             items(state.preferenceGroups) { group ->
+                 SettingsGroupCard(
+                     group = group,
+diff --git a/core/src/main/java/dev/jdtech/jellyfin/di/RepositoryModule.kt b/core/src/main/java/dev/jdtech/jellyfin/di/RepositoryModule.kt
+index d1f45847ca72314973ca92e29a4149083b5a5085..a6d0d066205e0c72f0939c870975a0ccab3b547b 100644
+--- a/core/src/main/java/dev/jdtech/jellyfin/di/RepositoryModule.kt
++++ b/core/src/main/java/dev/jdtech/jellyfin/di/RepositoryModule.kt
+@@ -24,9 +24,12 @@ object RepositoryModule {
+         jellyfinApi: JellyfinApi,
+         serverDatabase: ServerDatabaseDao,
+         appPreferences: AppPreferences,
++        localFolderMediaResolver: dev.jdtech.jellyfin.repository.LocalFolderMediaResolver,
+     ): JellyfinRepositoryImpl {
+         println("Creating new jellyfinRepositoryImpl")
+-        return JellyfinRepositoryImpl(application, jellyfinApi, serverDatabase, appPreferences)
++        return JellyfinRepositoryImpl(
++            application, jellyfinApi, serverDatabase, appPreferences, localFolderMediaResolver
++        )
+     }
+ 
+     @Singleton
+@@ -36,6 +39,7 @@ object RepositoryModule {
+         jellyfinApi: JellyfinApi,
+         serverDatabase: ServerDatabaseDao,
+         appPreferences: AppPreferences,
++        localFolderMediaResolver: dev.jdtech.jellyfin.repository.LocalFolderMediaResolver,
+     ): JellyfinRepositoryOfflineImpl {
+         println("Creating new jellyfinRepositoryOfflineImpl")
+         return JellyfinRepositoryOfflineImpl(
+@@ -43,6 +47,7 @@ object RepositoryModule {
+             jellyfinApi,
+             serverDatabase,
+             appPreferences,
++            localFolderMediaResolver,
+         )
+     }
+ 
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryImpl.kt b/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryImpl.kt
+index 6b2623380a88e5b62f6e3d37f01c5459822265a2..ecee6b455aef3294b0729f4315d3dbfcf711ec72 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryImpl.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryImpl.kt
+@@ -60,6 +60,7 @@ class JellyfinRepositoryImpl(
+     private val jellyfinApi: JellyfinApi,
+     private val database: ServerDatabaseDao,
+     private val appPreferences: AppPreferences,
++    private val localFolderMediaResolver: LocalFolderMediaResolver,
+ ) : JellyfinRepository {
+     override suspend fun getPublicSystemInfo(): PublicSystemInfo =
+         withContext(Dispatchers.IO) { jellyfinApi.systemApi.getPublicSystemInfo().content }
+@@ -306,6 +307,18 @@ class JellyfinRepositoryImpl(
+     override suspend fun getMediaSources(itemId: UUID, includePath: Boolean): List<FindroidSource> =
+         withContext(Dispatchers.IO) {
+             val sources = mutableListOf<FindroidSource>()
++            val cachedName =
++                runCatching { database.getMovie(itemId).name }.getOrNull()
++                    ?: runCatching { database.getEpisode(itemId).name }.getOrNull()
++            val itemName =
++                cachedName ?: runCatching {
++                    jellyfinApi.libraryApi.getItem(itemId, jellyfinApi.userId!!).content.name.orEmpty()
++                }.getOrDefault("")
++            if (itemName.isNotBlank()) {
++                localFolderMediaResolver.resolve(itemId, itemName)?.let {
++                    return@withContext listOf(it)
++                }
++            }
+             sources.addAll(
+                 jellyfinApi.mediaInfoApi
+                     .getPostedPlaybackInfo(
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryOfflineImpl.kt b/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryOfflineImpl.kt
+index 104c8e4eb4e9170262a66e50ddc86116dea41697..857f3f58d3aa706a94afe0517efc1e816ae30f21 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryOfflineImpl.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryOfflineImpl.kt
+@@ -38,6 +38,7 @@ class JellyfinRepositoryOfflineImpl(
+     private val jellyfinApi: JellyfinApi,
+     private val database: ServerDatabaseDao,
+     private val appPreferences: AppPreferences,
++    private val localFolderMediaResolver: LocalFolderMediaResolver,
+ ) : JellyfinRepository {
+ 
+     override suspend fun getPublicSystemInfo(): PublicSystemInfo {
+@@ -50,7 +51,9 @@ class JellyfinRepositoryOfflineImpl(
+ 
+     override suspend fun getMovie(itemId: UUID): FindroidMovie =
+         withContext(Dispatchers.IO) {
+-            database.getMovie(itemId).toFindroidMovie(database, jellyfinApi.userId!!)
++            val movie = database.getMovie(itemId).toFindroidMovie(database, jellyfinApi.userId!!)
++            val localSource = localFolderMediaResolver.resolve(itemId, movie.name)
++            if (localSource != null) movie.copy(sources = movie.sources + localSource) else movie
+         }
+ 
+     override suspend fun getShow(itemId: UUID): FindroidShow =
+@@ -65,7 +68,9 @@ class JellyfinRepositoryOfflineImpl(
+ 
+     override suspend fun getEpisode(itemId: UUID): FindroidEpisode =
+         withContext(Dispatchers.IO) {
+-            database.getEpisode(itemId).toFindroidEpisode(database, jellyfinApi.userId!!)
++            val episode = database.getEpisode(itemId).toFindroidEpisode(database, jellyfinApi.userId!!)
++            val localSource = localFolderMediaResolver.resolve(itemId, episode.name)
++            if (localSource != null) episode.copy(sources = episode.sources + localSource) else episode
+         }
+ 
+     override suspend fun getLibraries(): List<FindroidCollection> {
+@@ -205,7 +210,17 @@ class JellyfinRepositoryOfflineImpl(
+ 
+     override suspend fun getMediaSources(itemId: UUID, includePath: Boolean): List<FindroidSource> =
+         withContext(Dispatchers.IO) {
+-            database.getSources(itemId).map { it.toFindroidSource(database) }
++            val itemName =
++                runCatching { database.getMovie(itemId).name }.getOrNull()
++                    ?: runCatching { database.getEpisode(itemId).name }.getOrNull()
++                    ?: ""
++            val localFolderSource =
++                if (itemName.isNotBlank()) localFolderMediaResolver.resolve(itemId, itemName)
++                else null
++            buildList {
++                localFolderSource?.let(::add)
++                addAll(database.getSources(itemId).map { it.toFindroidSource(database) })
++            }
+         }
+ 
+     override suspend fun getStreamUrl(itemId: UUID, mediaSourceId: String): String {
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/repository/LocalFolderMediaResolver.kt b/data/src/main/java/dev/jdtech/jellyfin/repository/LocalFolderMediaResolver.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..196e916e5221ead330e2ca03c456d75a39ffa0dd
+--- /dev/null
++++ b/data/src/main/java/dev/jdtech/jellyfin/repository/LocalFolderMediaResolver.kt
+@@ -0,0 +1,92 @@
++package dev.jdtech.jellyfin.repository
++
++import android.content.ContentUris
++import android.content.Context
++import android.net.Uri
++import android.provider.DocumentsContract
++import dev.jdtech.jellyfin.models.FindroidMediaStream
++import dev.jdtech.jellyfin.models.FindroidSource
++import dev.jdtech.jellyfin.models.FindroidSourceType
++import dev.jdtech.jellyfin.settings.domain.AppPreferences
++import java.util.Locale
++import java.util.UUID
++import javax.inject.Inject
++import javax.inject.Singleton
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import timber.log.Timber
++
++/**
++ * Resolves a Jellyfin item to a video in the user-selected SAF folder.
++ *
++ * Only direct children are scanned intentionally: the configured folder represents one flat
++ * media directory. No filesystem paths are fabricated; playback receives the persisted content URI.
++ */
++@Singleton
++class LocalFolderMediaResolver
++@Inject
++constructor(
++    @ApplicationContext private val context: Context,
++    private val preferences: AppPreferences,
++) {
++    suspend fun resolve(itemId: UUID, itemName: String): FindroidSource? =
++        withContext(Dispatchers.IO) {
++            val tree = preferences.getValue(preferences.localMediaFolder)?.let(Uri::parse)
++                ?: return@withContext null
++            try {
++                val rootId = DocumentsContract.getTreeDocumentId(tree)
++                val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, rootId)
++                val projection = arrayOf(
++                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
++                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
++                    DocumentsContract.Document.COLUMN_MIME_TYPE,
++                )
++                val target = normalize(itemName)
++                context.contentResolver.query(childrenUri, projection, null, null, null)?.use { c ->
++                    val idColumn = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
++                    val nameColumn = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
++                    val mimeColumn = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
++                    while (c.moveToNext()) {
++                        val displayName = c.getString(nameColumn) ?: continue
++                        val mime = c.getString(mimeColumn)
++                        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) continue
++                        if (!isVideo(displayName, mime)) continue
++                        val candidate = normalize(displayName.substringBeforeLast('.', displayName))
++                        val exactMatch = candidate == target
++                        val yearSuffixMatch =
++                            candidate.matches(Regex("${Regex.escape(target)}(19|20)\\\\d{2}"))
++                        if (!exactMatch && !yearSuffixMatch) continue
++
++                        val documentUri = DocumentsContract.buildDocumentUriUsingTree(
++                            tree,
++                            c.getString(idColumn),
++                        )
++                        return@withContext FindroidSource(
++                            id = "local-folder-$itemId",
++                            name = displayName,
++                            type = FindroidSourceType.LOCAL,
++                            path = documentUri.toString(),
++                            size = 0L,
++                            mediaStreams = emptyList<FindroidMediaStream>(),
++                        )
++                    }
++                }
++            } catch (e: SecurityException) {
++                Timber.w(e, "Local media folder permission is no longer available")
++            } catch (e: Exception) {
++                Timber.w(e, "Unable to resolve local media for $itemId")
++            }
++            null
++        }
++
++    private fun normalize(value: String): String =
++        value.substringBeforeLast('.', value)
++            .lowercase(Locale.ROOT)
++            .replace(Regex("[^\\p{L}\\p{N}]"), "")
++
++    private fun isVideo(name: String, mime: String?): Boolean {
++        if (mime?.startsWith("video/") == true) return true
++        return name.substringAfterLast('.', "").lowercase(Locale.ROOT) in
++            setOf("mkv", "mp4", "avi", "mov", "webm", "m4v", "mpeg", "mpg", "ts")
++    }
++}
+diff --git a/player/local/src/main/java/dev/jdtech/jellyfin/player/local/domain/PlaylistManager.kt b/player/local/src/main/java/dev/jdtech/jellyfin/player/local/domain/PlaylistManager.kt
+index 63077487da0b3920a8999fb4ed70a0a71a9bc6e4..1b1235b6a793967737890afedfeac52261e28e5d 100644
+--- a/player/local/src/main/java/dev/jdtech/jellyfin/player/local/domain/PlaylistManager.kt
++++ b/player/local/src/main/java/dev/jdtech/jellyfin/player/local/domain/PlaylistManager.kt
+@@ -209,10 +209,13 @@ class PlaylistManager @Inject internal constructor(private val repository: Jelly
+         val mediaSources = repository.getMediaSources(id, true)
+         val mediaSource =
+             if (mediaSourceIndex == null) {
+-                mediaSources.firstOrNull { it.type == FindroidSourceType.LOCAL } ?: mediaSources[0]
++                mediaSources.firstOrNull { it.type == FindroidSourceType.LOCAL }
++                    ?: mediaSources.firstOrNull { it.type == FindroidSourceType.REMOTE }
+             } else {
+-                mediaSources[mediaSourceIndex]
+-            }
++                mediaSources.getOrNull(mediaSourceIndex)
++            } ?: throw IllegalStateException(
++                "No playable media source is available. Connect to the Jellyfin server or add a local copy."
++            )
+         val externalSubtitles =
+             mediaSource.mediaStreams
+                 .filter { mediaStream ->
+diff --git a/settings/src/main/java/dev/jdtech/jellyfin/settings/domain/AppPreferences.kt b/settings/src/main/java/dev/jdtech/jellyfin/settings/domain/AppPreferences.kt
+index b6e25ce4756a156581b05fff6e85addbf50727ab..70bc668ab663b589a1e0013bea34773054ccb877 100644
+--- a/settings/src/main/java/dev/jdtech/jellyfin/settings/domain/AppPreferences.kt
++++ b/settings/src/main/java/dev/jdtech/jellyfin/settings/domain/AppPreferences.kt
+@@ -102,6 +102,9 @@ class AppPreferences @Inject constructor(val sharedPreferences: SharedPreference
+     val sortBy = Preference("pref_sort_by", "SortName")
+     val sortOrder = Preference("pref_sort_order", "Ascending")
+ 
++    // Local media folder (persisted Storage Access Framework tree URI)
++    val localMediaFolder = Preference<String?>("pref_local_media_folder", null)
++
+     // Offline mode
+     val offlineMode = Preference("pref_offline_mode", false)
+ 
+diff --git a/settings/src/main/java/dev/jdtech/jellyfin/settings/presentation/settings/SettingsViewModel.kt b/settings/src/main/java/dev/jdtech/jellyfin/settings/presentation/settings/SettingsViewModel.kt
+index 286bb2e5c2da5ef3819b2abee05e4183405753cf..533cd0394e5d6c9923a840c5be5e27cbdc94a108 100644
+--- a/settings/src/main/java/dev/jdtech/jellyfin/settings/presentation/settings/SettingsViewModel.kt
++++ b/settings/src/main/java/dev/jdtech/jellyfin/settings/presentation/settings/SettingsViewModel.kt
+@@ -833,6 +833,10 @@ class SettingsViewModel @Inject constructor(private val appPreferences: AppPrefe
+                 )
+             )
+ 
++    fun setLocalMediaFolder(uri: String?) {
++        appPreferences.setValue(appPreferences.localMediaFolder, uri)
++    }
++
+     fun loadPreferences(indexes: List<Int> = emptyList(), deviceType: DeviceType) {
+         viewModelScope.launch {
+             var preferences = topLevelPreferences

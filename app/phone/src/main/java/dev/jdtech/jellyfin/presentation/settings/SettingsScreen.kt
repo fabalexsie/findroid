@@ -1,9 +1,12 @@
 package dev.jdtech.jellyfin.presentation.settings
 
 import android.app.Activity
+import android.content.Intent
 import android.app.UiModeManager
 import android.os.Build
 import androidx.annotation.StringRes
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
@@ -16,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -63,6 +67,20 @@ fun SettingsScreen(
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val context = LocalContext.current
+    val folderPicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) {
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                    viewModel.setLocalMediaFolder(uri.toString())
+                } catch (e: Exception) {
+                    Timber.e(e, "Unable to persist local media folder permission")
+                }
+            }
+        }
 
     val state by viewModel.state.collectAsStateWithLifecycle()
 
@@ -122,6 +140,7 @@ fun SettingsScreen(
     SettingsScreenLayout(
         title = indexes.last(),
         state = state,
+        onSelectLocalFolder = { folderPicker.launch(null) },
         onAction = { action ->
             when (action) {
                 is SettingsAction.OnBackClick -> navigateBack()
@@ -139,6 +158,7 @@ fun SettingsScreen(
 private fun SettingsScreenLayout(
     @StringRes title: Int,
     state: SettingsState,
+    onSelectLocalFolder: () -> Unit = {},
     onAction: (SettingsAction) -> Unit,
 ) {
     val contentPadding = PaddingValues(all = MaterialTheme.spacings.default)
@@ -171,6 +191,14 @@ private fun SettingsScreenLayout(
             verticalArrangement = Arrangement.spacedBy(MaterialTheme.spacings.medium),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            item {
+                OutlinedButton(
+                    onClick = onSelectLocalFolder,
+                    modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
+                ) {
+                    Text("Lokalen Medienordner auswählen")
+                }
+            }
             items(state.preferenceGroups) { group ->
                 SettingsGroupCard(
                     group = group,

@@ -38,6 +38,7 @@ class JellyfinRepositoryOfflineImpl(
     private val jellyfinApi: JellyfinApi,
     private val database: ServerDatabaseDao,
     private val appPreferences: AppPreferences,
+    private val localFolderMediaResolver: LocalFolderMediaResolver,
 ) : JellyfinRepository {
 
     override suspend fun getPublicSystemInfo(): PublicSystemInfo {
@@ -50,7 +51,9 @@ class JellyfinRepositoryOfflineImpl(
 
     override suspend fun getMovie(itemId: UUID): FindroidMovie =
         withContext(Dispatchers.IO) {
-            database.getMovie(itemId).toFindroidMovie(database, jellyfinApi.userId!!)
+            val movie = database.getMovie(itemId).toFindroidMovie(database, jellyfinApi.userId!!)
+            val localSource = localFolderMediaResolver.resolve(itemId, movie.name)
+            if (localSource != null) movie.copy(sources = movie.sources + localSource) else movie
         }
 
     override suspend fun getShow(itemId: UUID): FindroidShow =
@@ -65,7 +68,9 @@ class JellyfinRepositoryOfflineImpl(
 
     override suspend fun getEpisode(itemId: UUID): FindroidEpisode =
         withContext(Dispatchers.IO) {
-            database.getEpisode(itemId).toFindroidEpisode(database, jellyfinApi.userId!!)
+            val episode = database.getEpisode(itemId).toFindroidEpisode(database, jellyfinApi.userId!!)
+            val localSource = localFolderMediaResolver.resolve(itemId, episode.name)
+            if (localSource != null) episode.copy(sources = episode.sources + localSource) else episode
         }
 
     override suspend fun getLibraries(): List<FindroidCollection> {
@@ -205,7 +210,17 @@ class JellyfinRepositoryOfflineImpl(
 
     override suspend fun getMediaSources(itemId: UUID, includePath: Boolean): List<FindroidSource> =
         withContext(Dispatchers.IO) {
-            database.getSources(itemId).map { it.toFindroidSource(database) }
+            val itemName =
+                runCatching { database.getMovie(itemId).name }.getOrNull()
+                    ?: runCatching { database.getEpisode(itemId).name }.getOrNull()
+                    ?: ""
+            val localFolderSource =
+                if (itemName.isNotBlank()) localFolderMediaResolver.resolve(itemId, itemName)
+                else null
+            buildList {
+                localFolderSource?.let(::add)
+                addAll(database.getSources(itemId).map { it.toFindroidSource(database) })
+            }
         }
 
     override suspend fun getStreamUrl(itemId: UUID, mediaSourceId: String): String {

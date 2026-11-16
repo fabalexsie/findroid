@@ -221,6 +221,7 @@ private fun EpisodeScreenLayout(
                     }
                     ItemButtonsBar(
                         item = episode,
+                        canPlay = !isOfflineMode || episode.sources.any { it.type == FindroidSourceType.LOCAL },
                         downloaderState = downloaderState,
                         onPlayClick = { startFromBeginning ->
                             onAction(EpisodeAction.Play(startFromBeginning = startFromBeginning))

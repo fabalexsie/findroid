@@ -102,6 +102,9 @@ class AppPreferences @Inject constructor(val sharedPreferences: SharedPreference
     val sortBy = Preference("pref_sort_by", "SortName")
     val sortOrder = Preference("pref_sort_order", "Ascending")
 
+    // Local media folder (persisted Storage Access Framework tree URI)
+    val localMediaFolder = Preference<String?>("pref_local_media_folder", null)
+
     // Offline mode
     val offlineMode = Preference("pref_offline_mode", false)
 

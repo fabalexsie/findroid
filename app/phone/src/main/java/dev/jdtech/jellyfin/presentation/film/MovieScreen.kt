@@ -218,6 +218,7 @@ private fun MovieScreenLayout(
                     }
                     ItemButtonsBar(
                         item = movie,
+                        canPlay = !isOfflineMode || movie.sources.any { it.type == FindroidSourceType.LOCAL },
                         downloaderState = downloaderState,
                         onPlayClick = { startFromBeginning ->
                             onAction(MovieAction.Play(startFromBeginning = startFromBeginning))

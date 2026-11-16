@@ -60,6 +60,7 @@ class JellyfinRepositoryImpl(
     private val jellyfinApi: JellyfinApi,
     private val database: ServerDatabaseDao,
     private val appPreferences: AppPreferences,
+    private val localFolderMediaResolver: LocalFolderMediaResolver,
 ) : JellyfinRepository {
     override suspend fun getPublicSystemInfo(): PublicSystemInfo =
         withContext(Dispatchers.IO) { jellyfinApi.systemApi.getPublicSystemInfo().content }
@@ -306,6 +307,18 @@ class JellyfinRepositoryImpl(
     override suspend fun getMediaSources(itemId: UUID, includePath: Boolean): List<FindroidSource> =
         withContext(Dispatchers.IO) {
             val sources = mutableListOf<FindroidSource>()
+            val cachedName =
+                runCatching { database.getMovie(itemId).name }.getOrNull()
+                    ?: runCatching { database.getEpisode(itemId).name }.getOrNull()
+            val itemName =
+                cachedName ?: runCatching {
+                    jellyfinApi.libraryApi.getItem(itemId, jellyfinApi.userId!!).content.name.orEmpty()
+                }.getOrDefault("")
+            if (itemName.isNotBlank()) {
+                localFolderMediaResolver.resolve(itemId, itemName)?.let {
+                    return@withContext listOf(it)
+                }
+            }
             sources.addAll(
                 jellyfinApi.mediaInfoApi
                     .getPostedPlaybackInfo(

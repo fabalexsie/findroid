@@ -24,9 +24,12 @@ object RepositoryModule {
         jellyfinApi: JellyfinApi,
         serverDatabase: ServerDatabaseDao,
         appPreferences: AppPreferences,
+        localFolderMediaResolver: dev.jdtech.jellyfin.repository.LocalFolderMediaResolver,
     ): JellyfinRepositoryImpl {
         println("Creating new jellyfinRepositoryImpl")
-        return JellyfinRepositoryImpl(application, jellyfinApi, serverDatabase, appPreferences)
+        return JellyfinRepositoryImpl(
+            application, jellyfinApi, serverDatabase, appPreferences, localFolderMediaResolver
+        )
     }
 
     @Singleton
@@ -36,6 +39,7 @@ object RepositoryModule {
         jellyfinApi: JellyfinApi,
         serverDatabase: ServerDatabaseDao,
         appPreferences: AppPreferences,
+        localFolderMediaResolver: dev.jdtech.jellyfin.repository.LocalFolderMediaResolver,
     ): JellyfinRepositoryOfflineImpl {
         println("Creating new jellyfinRepositoryOfflineImpl")
         return JellyfinRepositoryOfflineImpl(
@@ -43,6 +47,7 @@ object RepositoryModule {
             jellyfinApi,
             serverDatabase,
             appPreferences,
+            localFolderMediaResolver,
         )
     }
 

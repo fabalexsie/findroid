@@ -209,10 +209,13 @@ class PlaylistManager @Inject internal constructor(private val repository: Jelly
         val mediaSources = repository.getMediaSources(id, true)
         val mediaSource =
             if (mediaSourceIndex == null) {
-                mediaSources.firstOrNull { it.type == FindroidSourceType.LOCAL } ?: mediaSources[0]
+                mediaSources.firstOrNull { it.type == FindroidSourceType.LOCAL }
+                    ?: mediaSources.firstOrNull { it.type == FindroidSourceType.REMOTE }
             } else {
-                mediaSources[mediaSourceIndex]
-            }
+                mediaSources.getOrNull(mediaSourceIndex)
+            } ?: throw IllegalStateException(
+                "No playable media source is available. Connect to the Jellyfin server or add a local copy."
+            )
         val externalSubtitles =
             mediaSource.mediaStreams
                 .filter { mediaStream ->

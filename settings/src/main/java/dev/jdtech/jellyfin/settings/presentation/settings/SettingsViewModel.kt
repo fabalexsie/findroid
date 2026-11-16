@@ -833,6 +833,10 @@ class SettingsViewModel @Inject constructor(private val appPreferences: AppPrefe
                 )
             )
 
+    fun setLocalMediaFolder(uri: String?) {
+        appPreferences.setValue(appPreferences.localMediaFolder, uri)
+    }
+
     fun loadPreferences(indexes: List<Int> = emptyList(), deviceType: DeviceType) {
         viewModelScope.launch {
             var preferences = topLevelPreferences
