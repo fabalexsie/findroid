@@ -45,10 +45,15 @@ import dev.jdtech.jellyfin.core.presentation.dummy.dummyVideoMetadata
 import dev.jdtech.jellyfin.film.presentation.movie.MovieAction
 import dev.jdtech.jellyfin.film.presentation.movie.MovieState
 import dev.jdtech.jellyfin.film.presentation.movie.MovieViewModel
+import dev.jdtech.jellyfin.models.FindroidSourceType
+import dev.jdtech.jellyfin.models.FindroidItem
+import dev.jdtech.jellyfin.models.HomeSection as HomeSectionModel
+import dev.jdtech.jellyfin.models.UiText
 import dev.jdtech.jellyfin.presentation.film.components.ActorsRow
 import dev.jdtech.jellyfin.presentation.film.components.ExtraInfoText
 import dev.jdtech.jellyfin.presentation.film.components.InfoText
 import dev.jdtech.jellyfin.presentation.film.components.ItemButtonsBar
+import dev.jdtech.jellyfin.presentation.film.components.HomeSection
 import dev.jdtech.jellyfin.presentation.film.components.ItemHeader
 import dev.jdtech.jellyfin.presentation.film.components.ItemTopBar
 import dev.jdtech.jellyfin.presentation.film.components.OverviewText
@@ -67,6 +72,7 @@ fun MovieScreen(
     navigateBack: () -> Unit,
     navigateHome: () -> Unit,
     navigateToPerson: (personId: UUID) -> Unit,
+    navigateToItem: (item: FindroidItem) -> Unit,
     viewModel: MovieViewModel = hiltViewModel(),
     downloaderViewModel: DownloaderViewModel = hiltViewModel(),
 ) {
@@ -99,6 +105,7 @@ fun MovieScreen(
     MovieScreenLayout(
         state = state,
         downloaderState = downloaderState,
+        onSimilarItemClick = navigateToItem,
         onAction = { action ->
             when (action) {
                 is MovieAction.Play -> {
@@ -130,6 +137,7 @@ fun MovieScreen(
 private fun MovieScreenLayout(
     state: MovieState,
     downloaderState: DownloaderState,
+    onSimilarItemClick: (FindroidItem) -> Unit = {},
     onAction: (MovieAction) -> Unit,
     onDownloaderAction: (DownloaderAction) -> Unit,
 ) {
@@ -268,6 +276,20 @@ private fun MovieScreenLayout(
                             onAction(MovieAction.NavigateToPerson(personId))
                         },
                         contentPadding = PaddingValues(start = paddingStart, end = paddingEnd),
+                    )
+                }
+                if (state.similarItems.isNotEmpty()) {
+                    Spacer(Modifier.height(MaterialTheme.spacings.medium))
+                    HomeSection(
+                        section =
+                            HomeSectionModel(
+                                id = UUID.nameUUIDFromBytes("similar:${movie.id}".toByteArray()),
+                                name = UiText.DynamicString("Ähnliches"),
+                                items = state.similarItems,
+                            ),
+                        itemsPadding = PaddingValues(start = paddingStart, end = paddingEnd),
+                        onAction = {},
+                        onItemClick = onSimilarItemClick,
                     )
                 }
                 Spacer(Modifier.height(paddingBottom))

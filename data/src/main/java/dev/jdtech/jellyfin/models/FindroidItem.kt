@@ -6,6 +6,8 @@ import java.util.UUID
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 
+enum class LocalMediaAvailability { LOCAL, SERVER_ONLY, UNKNOWN }
+
 interface FindroidItem {
     val id: UUID
     val name: String
@@ -21,6 +23,14 @@ interface FindroidItem {
     val unplayedItemCount: Int?
     val images: FindroidImages
     val chapters: List<FindroidChapter>
+
+    /** Availability is derived from the folder scan, not stored as a permanent media property. */
+    val localMediaAvailability: LocalMediaAvailability
+        get() = when {
+            sources.any { it.type == FindroidSourceType.LOCAL } -> LocalMediaAvailability.LOCAL
+            sources.any { it.type == FindroidSourceType.UNKNOWN } -> LocalMediaAvailability.UNKNOWN
+            else -> LocalMediaAvailability.SERVER_ONLY
+        }
 }
 
 suspend fun BaseItemDto.toFindroidItem(

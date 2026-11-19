@@ -50,6 +50,7 @@ import dev.jdtech.jellyfin.presentation.film.CollectionScreen
 import dev.jdtech.jellyfin.presentation.film.DownloadsScreen
 import dev.jdtech.jellyfin.presentation.film.EpisodeScreen
 import dev.jdtech.jellyfin.presentation.film.FavoritesScreen
+import dev.jdtech.jellyfin.presentation.film.GenreScreen
 import dev.jdtech.jellyfin.presentation.film.HomeScreen
 import dev.jdtech.jellyfin.presentation.film.LibraryScreen
 import dev.jdtech.jellyfin.presentation.film.MediaScreen
@@ -444,6 +445,7 @@ private fun EntryProviderScope<NavKey>.mainEntries(
                 },
             onManageServers = dropUnlessResumed { navigator.navigate(ServersRoute) },
             onItemClick = resumedAction { item -> navigateToItem(navigator, item) },
+            onGenreClick = resumedAction { genre -> navigator.navigate(GenreRoute(genre)) },
         )
     }
     entry<MediaRoute> {
@@ -488,11 +490,19 @@ private fun EntryProviderScope<NavKey>.mainEntries(
             navigateBack = dropUnlessResumed { navigator.goBack() },
         )
     }
+    entry<GenreRoute> { key ->
+        GenreScreen(
+            genre = key.genre,
+            onItemClick = resumedAction { item -> navigateToItem(navigator, item) },
+            navigateBack = dropUnlessResumed { navigator.goBack() },
+        )
+    }
     entry<MovieRoute> { key ->
         MovieScreen(
             movieId = UUID.fromString(key.movieId),
             navigateBack = dropUnlessResumed { navigator.goBack() },
             navigateHome = dropUnlessResumed { navigator.navigateHome() },
+            navigateToItem = resumedAction { item -> navigateToItem(navigator, item) },
             navigateToPerson =
                 resumedAction { personId ->
                     navigator.navigate(PersonRoute(personId = personId.toString()))

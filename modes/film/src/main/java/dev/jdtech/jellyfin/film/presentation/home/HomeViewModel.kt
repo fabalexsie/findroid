@@ -8,11 +8,15 @@ import dev.jdtech.jellyfin.film.R as FilmR
 import dev.jdtech.jellyfin.models.CollectionType
 import dev.jdtech.jellyfin.models.HomeItem
 import dev.jdtech.jellyfin.models.HomeSection
+import dev.jdtech.jellyfin.models.View
 import dev.jdtech.jellyfin.models.UiText
 import dev.jdtech.jellyfin.repository.JellyfinRepository
 import dev.jdtech.jellyfin.settings.domain.AppPreferences
 import dev.jdtech.jellyfin.utils.toView
 import java.util.UUID
+import dev.jdtech.jellyfin.models.FindroidItem
+import dev.jdtech.jellyfin.models.FindroidMovie
+import dev.jdtech.jellyfin.models.FindroidShow
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,6 +56,7 @@ constructor(
                 loadSuggestions()
                 loadResumeItems()
                 loadNextUpItems()
+                loadGenreItems()
                 loadViews()
             } catch (e: Exception) {
                 _state.emit(_state.value.copy(error = e))
@@ -126,20 +131,53 @@ constructor(
         _state.emit(_state.value.copy(nextUpSection = section))
     }
 
+    private suspend fun loadGenreItems() {
+        val sections =
+            repository.getGenreNames().mapNotNull { genre ->
+                val items =
+                    repository.getGenreItems(genre)
+                        .filter { it is FindroidMovie || it is FindroidShow }
+                        .take(20)
+                if (items.isEmpty()) null
+                else HomeSection(
+                    id = UUID.nameUUIDFromBytes("findroid-genre:$genre".toByteArray()),
+                    name = UiText.DynamicString(genre),
+                    items = items,
+                )
+            }
+        _state.emit(_state.value.copy(genreSections = sections))
+    }
+
     private suspend fun loadViews() {
         Timber.i("Loading views")
         val items =
             if (appPreferences.getValue(appPreferences.homeLatest)) {
-                repository
-                    .getUserViews()
-                    .filter { view ->
-                        CollectionType.fromString(view.collectionType?.serialName) in
-                            CollectionType.supported
+                if (appPreferences.getValue(appPreferences.offlineMode)) {
+                    repository.getLibraries().mapNotNull { library ->
+                        val latest = repository.getLatestMedia(library.id)
+                        if (latest.isEmpty()) null
+                        else HomeItem.ViewItem(View(library.id, library.name, latest, library.type))
                     }
-                    .map { view -> view to repository.getLatestMedia(view.id) }
-                    .filter { (_, latest) -> latest.isNotEmpty() }
-                    .map { (view, latest) -> view.toView(latest) }
-                    .map { HomeItem.ViewItem(it) }
+                } else {
+                    val remoteViews = runCatching { repository.getUserViews() }.getOrNull()
+                    if (remoteViews != null) {
+                        remoteViews
+                            .filter { view ->
+                                CollectionType.fromString(view.collectionType?.serialName) in
+                                    CollectionType.supported
+                            }
+                            .map { view -> view to repository.getLatestMedia(view.id) }
+                            .filter { (_, latest) -> latest.isNotEmpty() }
+                            .map { (view, latest) -> view.toView(latest) }
+                            .map { HomeItem.ViewItem(it) }
+                    } else {
+                        repository.getLibraries().mapNotNull { library ->
+                            val latest = repository.getLatestMedia(library.id)
+                            if (latest.isEmpty()) null
+                            else HomeItem.ViewItem(View(library.id, library.name, latest, library.type))
+                        }
+                    }
+                }
             } else {
                 emptyList()
             }

@@ -1,0 +1,2787 @@
+diff --git a/app/phone/src/main/AndroidManifest.xml b/app/phone/src/main/AndroidManifest.xml
+index 1658f17..75593dd 100644
+--- a/app/phone/src/main/AndroidManifest.xml
++++ b/app/phone/src/main/AndroidManifest.xml
+@@ -3,6 +3,7 @@
+     xmlns:tools="http://schemas.android.com/tools">
+ 
+     <uses-permission android:name="android.permission.INTERNET" />
++    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+     <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION" />
+     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/BaseApplication.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/BaseApplication.kt
+index 821d8cf..946b996 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/BaseApplication.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/BaseApplication.kt
+@@ -9,6 +9,8 @@ import androidx.work.Constraints
+ import androidx.work.ExistingWorkPolicy
+ import androidx.work.NetworkType
+ import androidx.work.OneTimeWorkRequestBuilder
++import androidx.work.PeriodicWorkRequestBuilder
++import androidx.work.ExistingPeriodicWorkPolicy
+ import androidx.work.WorkManager
+ import coil3.ImageLoader
+ import coil3.PlatformContext
+@@ -29,6 +31,7 @@ import javax.inject.Inject
+ import kotlin.time.ExperimentalTime
+ import okio.Path.Companion.toOkioPath
+ import timber.log.Timber
++import java.util.concurrent.TimeUnit
+ 
+ @HiltAndroidApp
+ class BaseApplication : Application(), Configuration.Provider, SingletonImageLoader.Factory {
+@@ -105,6 +108,16 @@ class BaseApplication : Application(), Configuration.Provider, SingletonImageLoa
+             existingWorkPolicy = ExistingWorkPolicy.KEEP,
+             request = syncWorkRequest,
+         )
++
++        val periodicSyncRequest =
++            PeriodicWorkRequestBuilder<SyncWorker>(12, TimeUnit.HOURS)
++                .setConstraints(constraints)
++                .build()
++        workManager.enqueueUniquePeriodicWork(
++            "syncLibraryAndUserData",
++            ExistingPeriodicWorkPolicy.KEEP,
++            periodicSyncRequest,
++        )
+     }
+ 
+     private fun scheduleMpvCleanup(workManager: WorkManager) {
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/NavigationRoot.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/NavigationRoot.kt
+index 9b221ee..5928408 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/NavigationRoot.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/NavigationRoot.kt
+@@ -50,6 +50,7 @@ import dev.jdtech.jellyfin.presentation.film.CollectionScreen
+ import dev.jdtech.jellyfin.presentation.film.DownloadsScreen
+ import dev.jdtech.jellyfin.presentation.film.EpisodeScreen
+ import dev.jdtech.jellyfin.presentation.film.FavoritesScreen
++import dev.jdtech.jellyfin.presentation.film.GenreScreen
+ import dev.jdtech.jellyfin.presentation.film.HomeScreen
+ import dev.jdtech.jellyfin.presentation.film.LibraryScreen
+ import dev.jdtech.jellyfin.presentation.film.MediaScreen
+@@ -444,6 +445,7 @@ private fun EntryProviderScope<NavKey>.mainEntries(
+                 },
+             onManageServers = dropUnlessResumed { navigator.navigate(ServersRoute) },
+             onItemClick = resumedAction { item -> navigateToItem(navigator, item) },
++            onGenreClick = resumedAction { genre -> navigator.navigate(GenreRoute(genre)) },
+         )
+     }
+     entry<MediaRoute> {
+@@ -488,11 +490,19 @@ private fun EntryProviderScope<NavKey>.mainEntries(
+             navigateBack = dropUnlessResumed { navigator.goBack() },
+         )
+     }
++    entry<GenreRoute> { key ->
++        GenreScreen(
++            genre = key.genre,
++            onItemClick = resumedAction { item -> navigateToItem(navigator, item) },
++            navigateBack = dropUnlessResumed { navigator.goBack() },
++        )
++    }
+     entry<MovieRoute> { key ->
+         MovieScreen(
+             movieId = UUID.fromString(key.movieId),
+             navigateBack = dropUnlessResumed { navigator.goBack() },
+             navigateHome = dropUnlessResumed { navigator.navigateHome() },
++            navigateToItem = resumedAction { item -> navigateToItem(navigator, item) },
+             navigateToPerson =
+                 resumedAction { personId ->
+                     navigator.navigate(PersonRoute(personId = personId.toString()))
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/NavigationRoutes.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/NavigationRoutes.kt
+index 3800706..190bb2a 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/NavigationRoutes.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/NavigationRoutes.kt
+@@ -38,6 +38,8 @@ data class CollectionRoute(val collectionId: String, val collectionName: String)
+ 
+ @Serializable data class MovieRoute(val movieId: String) : NavKey
+ 
++@Serializable data class GenreRoute(val genre: String) : NavKey
++
+ @Serializable data class ShowRoute(val showId: String) : NavKey
+ 
+ @Serializable data class EpisodeRoute(val episodeId: String) : NavKey
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/EpisodeScreen.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/EpisodeScreen.kt
+index 4140771..2e6b0e8 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/EpisodeScreen.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/EpisodeScreen.kt
+@@ -47,6 +47,7 @@ import dev.jdtech.jellyfin.core.presentation.dummy.dummyVideoMetadata
+ import dev.jdtech.jellyfin.film.presentation.episode.EpisodeAction
+ import dev.jdtech.jellyfin.film.presentation.episode.EpisodeState
+ import dev.jdtech.jellyfin.film.presentation.episode.EpisodeViewModel
++import dev.jdtech.jellyfin.models.FindroidSourceType
+ import dev.jdtech.jellyfin.presentation.film.components.ActorsRow
+ import dev.jdtech.jellyfin.presentation.film.components.ExtraInfoText
+ import dev.jdtech.jellyfin.presentation.film.components.ItemButtonsBar
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/GenreScreen.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/GenreScreen.kt
+new file mode 100644
+index 0000000..741294f
+--- /dev/null
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/GenreScreen.kt
+@@ -0,0 +1,92 @@
++package dev.jdtech.jellyfin.presentation.film
++
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.lazy.grid.GridCells
++import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
++import androidx.compose.foundation.lazy.grid.items
++import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.ExperimentalMaterial3Api
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Scaffold
++import androidx.compose.material3.Text
++import androidx.compose.material3.TopAppBar
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.res.painterResource
++import androidx.compose.ui.unit.dp
++import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
++import dev.jdtech.jellyfin.core.R as CoreR
++import dev.jdtech.jellyfin.film.presentation.home.GenreViewModel
++import dev.jdtech.jellyfin.models.FindroidItem
++import dev.jdtech.jellyfin.presentation.film.components.Direction
++import dev.jdtech.jellyfin.presentation.film.components.ItemCard
++import dev.jdtech.jellyfin.presentation.theme.spacings
++
++@Composable
++fun GenreScreen(
++    genre: String,
++    onItemClick: (FindroidItem) -> Unit,
++    navigateBack: () -> Unit,
++    viewModel: GenreViewModel = hiltViewModel(),
++) {
++    val state by viewModel.state.collectAsStateWithLifecycle()
++    LaunchedEffect(genre) { viewModel.load(genre) }
++
++    GenreScreenLayout(
++        genre = genre,
++        items = state.items,
++        isLoading = state.isLoading,
++        onItemClick = onItemClick,
++        navigateBack = navigateBack,
++    )
++}
++
++@OptIn(ExperimentalMaterial3Api::class)
++@Composable
++private fun GenreScreenLayout(
++    genre: String,
++    items: List<FindroidItem>,
++    isLoading: Boolean,
++    onItemClick: (FindroidItem) -> Unit,
++    navigateBack: () -> Unit,
++) {
++    Scaffold(
++        topBar = {
++            TopAppBar(
++                title = { Text(genre) },
++                navigationIcon = {
++                    IconButton(onClick = navigateBack) {
++                        Icon(painterResource(CoreR.drawable.ic_arrow_left), contentDescription = null)
++                    }
++                },
++            )
++        }
++    ) { padding ->
++        if (isLoading) {
++            Box(modifier = Modifier.padding(padding).fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
++                CircularProgressIndicator()
++            }
++        } else {
++            LazyVerticalGrid(
++                columns = GridCells.Adaptive(150.dp),
++                modifier = Modifier.fillMaxSize().padding(padding),
++                contentPadding = PaddingValues(MaterialTheme.spacings.default),
++                horizontalArrangement = Arrangement.spacedBy(MaterialTheme.spacings.default),
++                verticalArrangement = Arrangement.spacedBy(MaterialTheme.spacings.default),
++            ) {
++                items(items, key = { it.id }) { item ->
++                    ItemCard(item = item, direction = Direction.VERTICAL, onClick = onItemClick)
++                }
++            }
++        }
++    }
++}
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/HomeScreen.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/HomeScreen.kt
+index 5dcd657..2d7d498 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/HomeScreen.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/HomeScreen.kt
+@@ -54,6 +54,7 @@ fun HomeScreen(
+     onSettingsClick: () -> Unit,
+     onManageServers: () -> Unit,
+     onItemClick: (item: FindroidItem) -> Unit,
++    onGenreClick: (genre: String) -> Unit,
+     viewModel: HomeViewModel = hiltViewModel(),
+ ) {
+     val state by viewModel.state.collectAsStateWithLifecycle()
+@@ -65,6 +66,7 @@ fun HomeScreen(
+         onAction = { action ->
+             when (action) {
+                 is HomeAction.OnItemClick -> onItemClick(action.item)
++                is HomeAction.OnGenreClick -> onGenreClick(action.genre)
+                 is HomeAction.OnLibraryClick -> onLibraryClick(action.library)
+                 is HomeAction.OnSearchClick -> onSearchClick()
+                 is HomeAction.OnSettingsClick -> onSettingsClick()
+@@ -131,6 +133,16 @@ private fun HomeScreenLayout(state: HomeState, onAction: (HomeAction) -> Unit) {
+                         )
+                     }
+                 }
++                items(state.genreSections, key = { "genre-${it.id}" }) { section ->
++                    val genreName = section.name.asString()
++                    HomeSection(
++                        section = section,
++                        itemsPadding = itemsPadding,
++                        onAction = onAction,
++                        onTitleClick = { onAction(HomeAction.OnGenreClick(genreName)) },
++                        modifier = Modifier.animateItem(),
++                    )
++                }
+                 items(state.views, key = { it.id }) { view ->
+                     HomeView(
+                         view = view,
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/MovieScreen.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/MovieScreen.kt
+index 0ed8f6b..98f1720 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/MovieScreen.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/MovieScreen.kt
+@@ -45,10 +45,15 @@ import dev.jdtech.jellyfin.core.presentation.dummy.dummyVideoMetadata
+ import dev.jdtech.jellyfin.film.presentation.movie.MovieAction
+ import dev.jdtech.jellyfin.film.presentation.movie.MovieState
+ import dev.jdtech.jellyfin.film.presentation.movie.MovieViewModel
++import dev.jdtech.jellyfin.models.FindroidSourceType
++import dev.jdtech.jellyfin.models.FindroidItem
++import dev.jdtech.jellyfin.models.HomeSection as HomeSectionModel
++import dev.jdtech.jellyfin.models.UiText
+ import dev.jdtech.jellyfin.presentation.film.components.ActorsRow
+ import dev.jdtech.jellyfin.presentation.film.components.ExtraInfoText
+ import dev.jdtech.jellyfin.presentation.film.components.InfoText
+ import dev.jdtech.jellyfin.presentation.film.components.ItemButtonsBar
++import dev.jdtech.jellyfin.presentation.film.components.HomeSection
+ import dev.jdtech.jellyfin.presentation.film.components.ItemHeader
+ import dev.jdtech.jellyfin.presentation.film.components.ItemTopBar
+ import dev.jdtech.jellyfin.presentation.film.components.OverviewText
+@@ -67,6 +72,7 @@ fun MovieScreen(
+     navigateBack: () -> Unit,
+     navigateHome: () -> Unit,
+     navigateToPerson: (personId: UUID) -> Unit,
++    navigateToItem: (item: FindroidItem) -> Unit,
+     viewModel: MovieViewModel = hiltViewModel(),
+     downloaderViewModel: DownloaderViewModel = hiltViewModel(),
+ ) {
+@@ -99,6 +105,7 @@ fun MovieScreen(
+     MovieScreenLayout(
+         state = state,
+         downloaderState = downloaderState,
++        onSimilarItemClick = navigateToItem,
+         onAction = { action ->
+             when (action) {
+                 is MovieAction.Play -> {
+@@ -130,6 +137,7 @@ fun MovieScreen(
+ private fun MovieScreenLayout(
+     state: MovieState,
+     downloaderState: DownloaderState,
++    onSimilarItemClick: (FindroidItem) -> Unit = {},
+     onAction: (MovieAction) -> Unit,
+     onDownloaderAction: (DownloaderAction) -> Unit,
+ ) {
+@@ -270,6 +278,20 @@ private fun MovieScreenLayout(
+                         contentPadding = PaddingValues(start = paddingStart, end = paddingEnd),
+                     )
+                 }
++                if (state.similarItems.isNotEmpty()) {
++                    Spacer(Modifier.height(MaterialTheme.spacings.medium))
++                    HomeSection(
++                        section =
++                            HomeSectionModel(
++                                id = UUID.nameUUIDFromBytes("similar:${movie.id}".toByteArray()),
++                                name = UiText.DynamicString("Ähnliches"),
++                                items = state.similarItems,
++                            ),
++                        itemsPadding = PaddingValues(start = paddingStart, end = paddingEnd),
++                        onAction = {},
++                        onItemClick = onSimilarItemClick,
++                    )
++                }
+                 Spacer(Modifier.height(paddingBottom))
+             }
+         } ?: run { CircularProgressIndicator(modifier = Modifier.align(Alignment.Center)) }
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/HomeSection.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/HomeSection.kt
+index 5c73cdc..23d9887 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/HomeSection.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/HomeSection.kt
+@@ -1,5 +1,6 @@
+ package dev.jdtech.jellyfin.presentation.film.components
+ 
++import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+@@ -26,12 +27,16 @@ fun HomeSection(
+     itemsPadding: PaddingValues,
+     onAction: (HomeAction) -> Unit,
+     modifier: Modifier = Modifier,
++    onTitleClick: (() -> Unit)? = null,
++    onItemClick: ((dev.jdtech.jellyfin.models.FindroidItem) -> Unit)? = null,
+ ) {
+     Column(modifier = modifier) {
+         Box(modifier = Modifier.fillMaxWidth().height(42.dp).padding(itemsPadding)) {
+             Text(
+                 text = section.name.asString(),
+-                modifier = Modifier.align(Alignment.CenterStart),
++                modifier = Modifier.align(Alignment.CenterStart).then(
++                    if (onTitleClick != null) Modifier.clickable(onClick = onTitleClick) else Modifier
++                ),
+                 style = MaterialTheme.typography.titleMedium,
+             )
+         }
+@@ -44,7 +49,10 @@ fun HomeSection(
+                 ItemCard(
+                     item = item,
+                     direction = Direction.HORIZONTAL,
+-                    onClick = { onAction(HomeAction.OnItemClick(item)) },
++                    onClick = {
++                        if (onItemClick != null) onItemClick(item)
++                        else onAction(HomeAction.OnItemClick(item))
++                    },
+                 )
+             }
+         }
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/ItemCard.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/ItemCard.kt
+index c0f1b84..6e83520 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/ItemCard.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/ItemCard.kt
+@@ -26,6 +26,8 @@ import dev.jdtech.jellyfin.core.presentation.dummy.dummyMovie
+ import dev.jdtech.jellyfin.models.FindroidEpisode
+ import dev.jdtech.jellyfin.models.FindroidItem
+ import dev.jdtech.jellyfin.models.FindroidSeason
++import dev.jdtech.jellyfin.models.FindroidMovie
++import dev.jdtech.jellyfin.models.LocalMediaAvailability
+ import dev.jdtech.jellyfin.models.isDownloaded
+ import dev.jdtech.jellyfin.presentation.theme.FindroidTheme
+ import dev.jdtech.jellyfin.presentation.theme.spacings
+@@ -38,6 +40,8 @@ fun ItemCard(
+     modifier: Modifier = Modifier,
+     showSeriesName: Boolean = false,
+ ) {
++    val mediaAvailability = item.localMediaAvailability
++    val isVideoItem = item is FindroidMovie || item is FindroidEpisode
+     val width =
+         when (direction) {
+             Direction.HORIZONTAL -> 260
+@@ -59,6 +63,8 @@ fun ItemCard(
+                     horizontalArrangement = Arrangement.spacedBy(MaterialTheme.spacings.small),
+                 ) {
+                     if (item.isDownloaded()) DownloadedBadge()
++                    if (isVideoItem && mediaAvailability == LocalMediaAvailability.SERVER_ONLY) ServerOnlyBadge()
++                    if (isVideoItem && mediaAvailability == LocalMediaAvailability.UNKNOWN) UnknownAvailabilityBadge()
+                     if (item.played) PlayedBadge()
+                     item.unplayedItemCount?.takeIf { it > 0 }?.let { ItemCountBadge(it) }
+                 }
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/ServerOnlyBadge.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/ServerOnlyBadge.kt
+new file mode 100644
+index 0000000..10ec784
+--- /dev/null
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/ServerOnlyBadge.kt
+@@ -0,0 +1,25 @@
++package dev.jdtech.jellyfin.presentation.film.components
++
++import androidx.compose.foundation.layout.padding
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.unit.dp
++
++@Composable
++fun ServerOnlyBadge(modifier: Modifier = Modifier) {
++    Surface(
++        modifier = modifier,
++        color = MaterialTheme.colorScheme.surfaceVariant,
++        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
++        shape = MaterialTheme.shapes.small,
++    ) {
++        Text(
++            text = "Server",
++            style = MaterialTheme.typography.labelSmall,
++            modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
++        )
++    }
++}
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/UnknownAvailabilityBadge.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/UnknownAvailabilityBadge.kt
+new file mode 100644
+index 0000000..48a16c9
+--- /dev/null
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/film/components/UnknownAvailabilityBadge.kt
+@@ -0,0 +1,25 @@
++package dev.jdtech.jellyfin.presentation.film.components
++
++import androidx.compose.foundation.layout.padding
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.unit.dp
++
++@Composable
++fun UnknownAvailabilityBadge(modifier: Modifier = Modifier) {
++    Surface(
++        modifier = modifier,
++        color = MaterialTheme.colorScheme.tertiaryContainer,
++        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
++        shape = MaterialTheme.shapes.small,
++    ) {
++        Text(
++            text = "Prüfen",
++            style = MaterialTheme.typography.labelSmall,
++            modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
++        )
++    }
++}
+diff --git a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/settings/SettingsScreen.kt b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/settings/SettingsScreen.kt
+index 6c6b698..a889d72 100644
+--- a/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/settings/SettingsScreen.kt
++++ b/app/phone/src/main/java/dev/jdtech/jellyfin/presentation/settings/SettingsScreen.kt
+@@ -8,6 +8,12 @@ import androidx.annotation.StringRes
+ import androidx.activity.compose.rememberLauncherForActivityResult
+ import androidx.activity.result.contract.ActivityResultContracts
+ import androidx.appcompat.app.AppCompatDelegate
++import androidx.work.Constraints
++import androidx.work.ExistingWorkPolicy
++import androidx.work.NetworkType
++import androidx.work.OneTimeWorkRequestBuilder
++import androidx.work.WorkManager
++import dev.jdtech.jellyfin.work.SyncWorker
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.PaddingValues
+ import androidx.compose.foundation.layout.fillMaxSize
+@@ -161,6 +167,7 @@ private fun SettingsScreenLayout(
+     onSelectLocalFolder: () -> Unit = {},
+     onAction: (SettingsAction) -> Unit,
+ ) {
++    val context = LocalContext.current
+     val contentPadding = PaddingValues(all = MaterialTheme.spacings.default)
+ 
+     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+@@ -199,6 +206,28 @@ private fun SettingsScreenLayout(
+                     Text("Lokalen Medienordner auswählen")
+                 }
+             }
++            item {
++                OutlinedButton(
++                    onClick = {
++                        val request =
++                            OneTimeWorkRequestBuilder<SyncWorker>()
++                                .setConstraints(
++                                    Constraints.Builder()
++                                        .setRequiredNetworkType(NetworkType.CONNECTED)
++                                        .build()
++                                )
++                                .build()
++                        WorkManager.getInstance(context).enqueueUniqueWork(
++                            "manualLibrarySync",
++                            ExistingWorkPolicy.REPLACE,
++                            request,
++                        )
++                    },
++                    modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
++                ) {
++                    Text("Offline-Mediathek synchronisieren (WLAN)")
++                }
++            }
+             items(state.preferenceGroups) { group ->
+                 SettingsGroupCard(
+                     group = group,
+diff --git a/core/src/main/java/dev/jdtech/jellyfin/di/RepositoryModule.kt b/core/src/main/java/dev/jdtech/jellyfin/di/RepositoryModule.kt
+index a6d0d06..57706ad 100644
+--- a/core/src/main/java/dev/jdtech/jellyfin/di/RepositoryModule.kt
++++ b/core/src/main/java/dev/jdtech/jellyfin/di/RepositoryModule.kt
+@@ -25,10 +25,11 @@ object RepositoryModule {
+         serverDatabase: ServerDatabaseDao,
+         appPreferences: AppPreferences,
+         localFolderMediaResolver: dev.jdtech.jellyfin.repository.LocalFolderMediaResolver,
++        offlineRepository: JellyfinRepositoryOfflineImpl,
+     ): JellyfinRepositoryImpl {
+         println("Creating new jellyfinRepositoryImpl")
+         return JellyfinRepositoryImpl(
+-            application, jellyfinApi, serverDatabase, appPreferences, localFolderMediaResolver
++            application, jellyfinApi, serverDatabase, appPreferences, localFolderMediaResolver, offlineRepository
+         )
+     }
+ 
+diff --git a/core/src/main/java/dev/jdtech/jellyfin/work/SyncWorker.kt b/core/src/main/java/dev/jdtech/jellyfin/work/SyncWorker.kt
+index 3beea68..8036448 100644
+--- a/core/src/main/java/dev/jdtech/jellyfin/work/SyncWorker.kt
++++ b/core/src/main/java/dev/jdtech/jellyfin/work/SyncWorker.kt
+@@ -1,6 +1,8 @@
+ package dev.jdtech.jellyfin.work
+ 
+ import android.content.Context
++import android.net.ConnectivityManager
++import android.net.Uri
+ import androidx.hilt.work.HiltWorker
+ import androidx.work.CoroutineWorker
+ import androidx.work.WorkerParameters
+@@ -8,12 +10,35 @@ import dagger.assisted.Assisted
+ import dagger.assisted.AssistedInject
+ import dev.jdtech.jellyfin.api.JellyfinApi
+ import dev.jdtech.jellyfin.database.ServerDatabaseDao
+-import dev.jdtech.jellyfin.models.FindroidItem
++import dev.jdtech.jellyfin.models.CachedJellyfinItemDto
++import dev.jdtech.jellyfin.models.CachedLibraryDto
++import dev.jdtech.jellyfin.models.CachedPersonDto
++import dev.jdtech.jellyfin.models.FindroidEpisodeDto
++import dev.jdtech.jellyfin.models.FindroidMovieDto
++import dev.jdtech.jellyfin.models.FindroidSeasonDto
++import dev.jdtech.jellyfin.models.FindroidShowDto
++import dev.jdtech.jellyfin.models.LibraryMediaDto
++import dev.jdtech.jellyfin.models.MediaGenreDto
++import dev.jdtech.jellyfin.models.MediaPersonDto
++import dev.jdtech.jellyfin.models.SimilarMediaDto
+ import dev.jdtech.jellyfin.models.User
+-import dev.jdtech.jellyfin.models.toFindroidEpisode
+-import dev.jdtech.jellyfin.models.toFindroidMovie
++import dev.jdtech.jellyfin.models.toFindroidChapters
+ import dev.jdtech.jellyfin.settings.domain.AppPreferences
++import java.io.File
++import java.io.IOException
++import java.util.UUID
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import kotlinx.serialization.encodeToString
++import kotlinx.serialization.json.Json
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import org.jellyfin.sdk.model.api.BaseItemDto
++import org.jellyfin.sdk.model.api.BaseItemKind
++import org.jellyfin.sdk.model.api.ImageType
++import org.jellyfin.sdk.model.api.ItemFields
+ import org.jellyfin.sdk.model.api.UpdateUserItemDataDto
++import timber.log.Timber
+ 
+ @HiltWorker
+ class SyncWorker
+@@ -24,8 +49,16 @@ constructor(
+     val database: ServerDatabaseDao,
+     val appPreferences: AppPreferences,
+ ) : CoroutineWorker(context, workerParams) {
++    private val httpClient by lazy { OkHttpClient() }
++    private val metadataJson = Json { ignoreUnknownKeys = true; explicitNulls = false }
+ 
+     override suspend fun doWork(): Result {
++        val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
++        val activeNetwork = connectivity.activeNetwork
++        val capabilities = activeNetwork?.let(connectivity::getNetworkCapabilities)
++        if (capabilities?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) != true) {
++            return Result.retry()
++        }
+         val jellyfinApi =
+             JellyfinApi(
+                 androidContext = context.applicationContext,
+@@ -34,45 +67,395 @@ constructor(
+                 socketTimeout = appPreferences.getValue(appPreferences.socketTimeout),
+             )
+ 
+-        val servers = database.getServers()
+-
+-        for (server in servers) {
+-            val serverWithAddressesAndUsers =
+-                database.getServerWithAddressesAndUsers(server.id) ?: continue
+-            val serverAddress =
+-                serverWithAddressesAndUsers.addresses.firstOrNull {
+-                    it.id == server.currentServerAddressId
+-                } ?: continue
+-            for (user in serverWithAddressesAndUsers.users) {
+-                jellyfinApi.apply {
+-                    api.update(baseUrl = serverAddress.address, accessToken = user.accessToken)
+-                    userId = user.id
+-                }
+-                val movies =
+-                    database.getMoviesByServerId(server.id).map {
+-                        it.toFindroidMovie(database, user.id)
++        return try {
++            for (server in database.getServers()) {
++                val serverWithAddressesAndUsers =
++                    database.getServerWithAddressesAndUsers(server.id) ?: continue
++                val serverAddress =
++                    serverWithAddressesAndUsers.addresses.firstOrNull {
++                        it.id == server.currentServerAddressId
++                    } ?: continue
++
++                // The library cache is keyed per server (not per account), so sync only the
++                // currently selected account for this server.
++                for (user in serverWithAddressesAndUsers.users.filter { it.id == server.currentUserId }) {
++                    val accessToken = user.accessToken ?: continue
++                    jellyfinApi.apply {
++                        api.update(baseUrl = serverAddress.address, accessToken = accessToken)
++                        userId = user.id
+                     }
+-                val episodes =
+-                    database.getEpisodesByServerId(server.id).map {
+-                        it.toFindroidEpisode(database, user.id)
++                    syncLibrary(jellyfinApi, server.id, user, accessToken, serverAddress.address)
++
++                    val movies =
++                        database.getMoviesByServerId(server.id).mapNotNull { movie ->
++                            runCatching { movie.toFindroidMovie(database, user.id) }.getOrNull()
++                        }
++                    val episodes =
++                        database.getEpisodesByServerId(server.id).mapNotNull { episode ->
++                            runCatching { episode.toFindroidEpisode(database, user.id) }.getOrNull()
++                        }
++                    syncUserData(jellyfinApi, user, movies + episodes)
++                }
++            }
++            Result.success()
++        } catch (e: Exception) {
++            Timber.e(e, "Library/user-data sync failed")
++            Result.retry()
++        }
++    }
++
++    /** Fetches every supported item in every Jellyfin view, in bounded pages. */
++    private suspend fun syncLibrary(
++        jellyfinApi: JellyfinApi,
++        serverId: String,
++        user: User,
++        accessToken: String,
++        baseUrl: String,
++    ) {
++        val views = jellyfinApi.userViewApi.getUserViews(user.id).content.items
++        database.deleteCachedLibraries(serverId)
++        database.insertCachedLibraries(
++            views.map { view ->
++                CachedLibraryDto(
++                    serverId = serverId,
++                    id = view.id,
++                    name = view.name.orEmpty(),
++                    collectionType = view.collectionType?.serialName,
++                    primaryImageTag = view.imageTags?.get(ImageType.PRIMARY),
++                )
++            }
++        )
++
++        val itemKinds =
++            listOf(
++                BaseItemKind.MOVIE,
++                BaseItemKind.SERIES,
++                BaseItemKind.SEASON,
++                BaseItemKind.EPISODE,
++            )
++        val fields =
++            listOf(
++                ItemFields.OVERVIEW,
++                ItemFields.GENRES,
++                ItemFields.PEOPLE,
++                ItemFields.CHAPTERS,
++                ItemFields.MEDIA_STREAMS,
++                ItemFields.PROVIDER_IDS,
++                ItemFields.STUDIOS,
++                ItemFields.TAGLINES,
++                ItemFields.DATE_CREATED,
++                ItemFields.PARENT_ID,
++                ItemFields.PATH,
++                ItemFields.SORT_NAME,
++                ItemFields.PRIMARY_IMAGE_ASPECT_RATIO,
++            )
++
++        for (view in views) {
++            downloadImage(
++                imageUrl(baseUrl, view.id, ImageType.PRIMARY, view.imageTags?.get(ImageType.PRIMARY)),
++                accessToken,
++                File(context.filesDir, "images/${view.id}/primary"),
++            )
++            val libraryItems = mutableListOf<LibraryMediaDto>()
++            var startIndex = 0
++            while (true) {
++                val page =
++                    jellyfinApi.libraryApi
++                        .getItems(
++                            userId = user.id,
++                            parentId = view.id,
++                            includeItemTypes = itemKinds,
++                            recursive = true,
++                            startIndex = startIndex,
++                            limit = PAGE_SIZE,
++                            fields = fields,
++                        )
++                        .content
++                val items = page.items
++                if (items.isEmpty()) break
++
++                libraryItems += items.filter { item -> item.type?.let(itemKinds::contains) == true }.map { item ->
++                    LibraryMediaDto(serverId = serverId, libraryId = view.id, itemId = item.id)
++                }
++                for (item in items) {
++                    try {
++                        persistItem(serverId, user, item)
++                        cachePersonDetails(jellyfinApi, serverId, user, item)
++                        downloadItemImages(baseUrl, accessToken, item)
++                        if (item.type == BaseItemKind.MOVIE || item.type == BaseItemKind.SERIES) {
++                            syncSimilarItems(jellyfinApi, serverId, user, item)
++                        }
++                    } catch (e: Exception) {
++                        Timber.w(e, "Unable to cache item ${item.id}")
+                     }
++                }
++
++                startIndex += items.size
++                if (items.size < PAGE_SIZE) break
++            }
++            // Replace the view membership only after all pages completed successfully. A
++            // transient server failure must not make a previously cached library disappear.
++            database.deleteLibraryMedia(serverId, view.id)
++            if (libraryItems.isNotEmpty()) database.insertLibraryMedia(libraryItems)
++        }
++    }
++
++    private suspend fun persistItem(serverId: String, user: User, item: BaseItemDto) {
++        database.insertCachedJellyfinItem(
++            CachedJellyfinItemDto(
++                serverId = serverId,
++                itemId = item.id,
++                payload = metadataJson.encodeToString(item),
++                syncedAt = System.currentTimeMillis(),
++            )
++        )
++        when (item.type) {
++            BaseItemKind.MOVIE -> {
++                database.insertMovie(
++                    FindroidMovieDto(
++                        id = item.id,
++                        serverId = serverId,
++                        name = item.name.orEmpty(),
++                        originalTitle = item.originalTitle,
++                        overview = item.overview.orEmpty(),
++                        runtimeTicks = item.runTimeTicks ?: 0L,
++                        premiereDate = item.premiereDate,
++                        communityRating = item.communityRating,
++                        officialRating = item.officialRating,
++                        status = item.status ?: "Ended",
++                        productionYear = item.productionYear,
++                        endDate = item.endDate,
++                        chapters = item.toFindroidChapters(),
++                    )
++                )
++            }
++            BaseItemKind.SERIES -> {
++                database.insertShow(
++                    FindroidShowDto(
++                        id = item.id,
++                        serverId = serverId,
++                        name = item.name.orEmpty(),
++                        originalTitle = item.originalTitle,
++                        overview = item.overview.orEmpty(),
++                        runtimeTicks = item.runTimeTicks ?: 0L,
++                        communityRating = item.communityRating,
++                        officialRating = item.officialRating,
++                        status = item.status ?: "Ended",
++                        productionYear = item.productionYear,
++                        endDate = item.endDate,
++                    )
++                )
++            }
++            BaseItemKind.SEASON -> {
++                val seriesId = item.seriesId ?: return
++                database.insertShowIfMissing(seriesId, serverId)
++                database.insertSeason(
++                    FindroidSeasonDto(
++                        id = item.id,
++                        seriesId = seriesId,
++                        name = item.name.orEmpty(),
++                        seriesName = item.seriesName.orEmpty(),
++                        overview = item.overview.orEmpty(),
++                        indexNumber = item.indexNumber ?: 0,
++                    )
++                )
++            }
++            BaseItemKind.EPISODE -> {
++                val seriesId = item.seriesId ?: return
++                val seasonId = item.seasonId ?: return
++                database.insertShowIfMissing(seriesId, serverId)
++                database.insertEpisodeSeasonIfMissing(item, seasonId, seriesId)
++                database.insertEpisode(
++                    FindroidEpisodeDto(
++                        id = item.id,
++                        serverId = serverId,
++                        seasonId = seasonId,
++                        seriesId = seriesId,
++                        name = item.name.orEmpty(),
++                        seriesName = item.seriesName.orEmpty(),
++                        overview = item.overview.orEmpty(),
++                        indexNumber = item.indexNumber ?: 0,
++                        indexNumberEnd = item.indexNumberEnd,
++                        parentIndexNumber = item.parentIndexNumber ?: 0,
++                        runtimeTicks = item.runTimeTicks ?: 0L,
++                        premiereDate = item.premiereDate,
++                        communityRating = item.communityRating,
++                        chapters = item.toFindroidChapters(),
++                    )
++                )
++            }
++            else -> return
++        }
++
++        database.deleteMediaGenres(serverId, item.id)
++        item.genres.orEmpty().distinct().filter(String::isNotBlank).takeIf { it.isNotEmpty() }?.let {
++            database.insertMediaGenres(it.map { genre -> MediaGenreDto(serverId, item.id, genre) })
++        }
++        database.deleteMediaPeople(serverId, item.id)
++        item.people.orEmpty().map { person ->
++            MediaPersonDto(
++                serverId = serverId,
++                itemId = item.id,
++                personId = person.id,
++                name = person.name.orEmpty(),
++                type = person.type.serialName,
++                role = person.role.orEmpty(),
++                primaryImageTag = person.primaryImageTag,
++            )
++        }.takeIf { it.isNotEmpty() }?.let(database::insertMediaPeople)
++
++        database.insertUserData(
++            dev.jdtech.jellyfin.models.FindroidUserDataDto(
++                userId = user.id,
++                itemId = item.id,
++                played = item.userData?.played == true,
++                favorite = item.userData?.isFavorite == true,
++                playbackPositionTicks = item.userData?.playbackPositionTicks ?: 0L,
++            )
++        )
++    }
+ 
+-                syncUserData(jellyfinApi, user, movies)
+-                syncUserData(jellyfinApi, user, episodes)
++    private suspend fun cachePersonDetails(
++        jellyfinApi: JellyfinApi,
++        serverId: String,
++        user: User,
++        item: BaseItemDto,
++    ) {
++        for (credit in item.people.orEmpty()) {
++            if (database.getCachedPersonDetails(serverId, credit.id) != null) continue
++            try {
++                val person = jellyfinApi.libraryApi.getItem(credit.id, user.id).content
++                database.insertCachedPerson(
++                    CachedPersonDto(
++                        serverId = serverId,
++                        id = credit.id,
++                        name = person.name ?: credit.name.orEmpty(),
++                        overview = person.overview.orEmpty(),
++                        primaryImageTag = person.imageTags?.get(ImageType.PRIMARY) ?: credit.primaryImageTag,
++                    )
++                )
++            } catch (e: Exception) {
++                Timber.d(e, "Unable to cache person ${credit.id}")
++            }
++        }
++    }
++
++    private suspend fun syncSimilarItems(
++        jellyfinApi: JellyfinApi,
++        serverId: String,
++        user: User,
++        item: BaseItemDto,
++    ) {
++        val recommendations =
++            jellyfinApi.libraryApi
++                .getSimilarItems(
++                    itemId = item.id,
++                    userId = user.id,
++                    limit = SIMILAR_LIMIT,
++                    fields = listOf(ItemFields.OVERVIEW, ItemFields.GENRES, ItemFields.PEOPLE),
++                )
++                .content
++                .items
++        database.deleteSimilarMedia(serverId, item.id)
++        recommendations.forEachIndexed { index, recommendation ->
++            if (
++                recommendation.id != item.id &&
++                    (recommendation.type == BaseItemKind.MOVIE || recommendation.type == BaseItemKind.SERIES)
++            ) {
++                // Jellyfin can return recommendations from another view; cache their metadata too.
++                persistItem(serverId, user, recommendation)
++                database.insertSimilarMedia(
++                    listOf(
++                        SimilarMediaDto(
++                            serverId = serverId,
++                            itemId = item.id,
++                            similarItemId = recommendation.id,
++                            sortOrder = index,
++                        )
++                    )
++                )
+             }
+         }
++    }
+ 
+-        return Result.success()
++    private suspend fun downloadItemImages(baseUrl: String, accessToken: String, item: BaseItemDto) {
++        val itemRoot = File(context.filesDir, "images/${item.id}")
++        val images =
++            listOfNotNull(
++                imageUrl(baseUrl, item.id, ImageType.PRIMARY, item.imageTags?.get(ImageType.PRIMARY)) to
++                    File(itemRoot, "primary"),
++                imageUrl(baseUrl, item.id, ImageType.BACKDROP, item.backdropImageTags?.firstOrNull(), 0) to
++                    File(itemRoot, "backdrop"),
++                imageUrl(baseUrl, item.id, ImageType.LOGO, item.imageTags?.get(ImageType.LOGO)) to
++                    File(itemRoot, "logo"),
++                imageUrl(baseUrl, item.id, ImageType.ART, item.imageTags?.get(ImageType.ART)) to
++                    File(itemRoot, "art"),
++                imageUrl(baseUrl, item.id, ImageType.THUMB, item.imageTags?.get(ImageType.THUMB)) to
++                    File(itemRoot, "thumb"),
++            )
++        for ((uri, file) in images) downloadImage(uri, accessToken, file)
++
++        item.chapters.orEmpty().forEachIndexed { index, chapter ->
++            val uri = imageUrl(baseUrl, item.id, ImageType.CHAPTER, null, index)
++            downloadImage(uri, accessToken, File(itemRoot, "chapters/$index"))
++        }
++
++        item.people.orEmpty().forEach { person ->
++            val tag = person.primaryImageTag ?: return@forEach
++            val uri = imageUrl(baseUrl, person.id, ImageType.PRIMARY, tag)
++            downloadImage(uri, accessToken, File(context.filesDir, "images/people/${person.id}/primary"))
++        }
++    }
++
++    private fun imageUrl(
++        baseUrl: String,
++        itemId: UUID,
++        imageType: ImageType,
++        tag: String?,
++        index: Int? = null,
++    ): String? {
++        if (tag.isNullOrBlank() && imageType != ImageType.CHAPTER) return null
++        val builder =
++            Uri.parse(baseUrl).buildUpon()
++                .appendPath("Items")
++                .appendPath(itemId.toString())
++                .appendPath("Images")
++                .appendPath(imageType.serialName)
++        index?.let { builder.appendPath(it.toString()) }
++        tag?.let { builder.appendQueryParameter("tag", it) }
++        return builder.build().toString()
++    }
++
++    private suspend fun downloadImage(url: String?, accessToken: String, file: File) {
++        if (url == null) return
++        val imageTag = Uri.parse(url).getQueryParameter("tag")
++        val tagFile = File(file.parentFile, "${file.name}.tag")
++        if (file.isFile && (imageTag == null || runCatching { tagFile.readText() == imageTag }.getOrDefault(false))) return
++        withContext(Dispatchers.IO) {
++            try {
++                val request = Request.Builder().url(url).header("X-Emby-Token", accessToken).build()
++                httpClient.newCall(request).execute().use { response ->
++                    if (!response.isSuccessful) return@withContext
++                    val bytes = response.body.bytes()
++                    if (bytes.isNotEmpty()) {
++                        file.parentFile?.mkdirs()
++                        file.writeBytes(bytes)
++                        if (imageTag != null) tagFile.writeText(imageTag)
++                    }
++                }
++            } catch (e: IOException) {
++                Timber.w(e, "Image download failed: $url")
++            }
++        }
+     }
+ 
+     private suspend fun syncUserData(
+         jellyfinApi: JellyfinApi,
+         user: User,
+-        items: List<FindroidItem>,
++        items: List<dev.jdtech.jellyfin.models.FindroidItem>,
+     ) {
+         for (item in items) {
+             val userData = database.getUserDataToBeSynced(user.id, item.id) ?: continue
+-
+             try {
+                 jellyfinApi.userDataApi.updateItemUserData(
+                     itemId = item.id,
+@@ -84,9 +467,52 @@ constructor(
+                             played = userData.played,
+                         ),
+                 )
+-
+                 database.setUserDataToBeSynced(user.id, item.id, false)
+             } catch (_: Exception) {}
+         }
+     }
++
++    companion object {
++        private const val PAGE_SIZE = 200
++        private const val SIMILAR_LIMIT = 20
++    }
++}
++
++private suspend fun ServerDatabaseDao.insertShowIfMissing(seriesId: UUID, serverId: String) {
++    if (findShow(seriesId) == null) {
++        insertShow(
++            FindroidShowDto(
++                id = seriesId,
++                serverId = serverId,
++                name = "",
++                originalTitle = null,
++                overview = "",
++                runtimeTicks = 0,
++                communityRating = null,
++                officialRating = null,
++                status = "Ended",
++                productionYear = null,
++                endDate = null,
++            )
++        )
++    }
++}
++
++private suspend fun ServerDatabaseDao.insertEpisodeSeasonIfMissing(
++    item: BaseItemDto,
++    seasonId: UUID,
++    seriesId: UUID,
++) {
++    if (runCatching { getSeason(seasonId) }.isFailure) {
++        insertSeason(
++            FindroidSeasonDto(
++                id = seasonId,
++                seriesId = seriesId,
++                name = item.seasonName.orEmpty(),
++                seriesName = item.seriesName.orEmpty(),
++                overview = "",
++                indexNumber = item.parentIndexNumber ?: 0,
++            )
++        )
++    }
+ }
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/database/ServerDatabase.kt b/data/src/main/java/dev/jdtech/jellyfin/database/ServerDatabase.kt
+index 07331f9..cec0632 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/database/ServerDatabase.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/database/ServerDatabase.kt
+@@ -18,6 +18,13 @@ import dev.jdtech.jellyfin.models.FindroidShowDto
+ import dev.jdtech.jellyfin.models.FindroidSourceDto
+ import dev.jdtech.jellyfin.models.FindroidTrickplayInfoDto
+ import dev.jdtech.jellyfin.models.FindroidUserDataDto
++import dev.jdtech.jellyfin.models.CachedJellyfinItemDto
++import dev.jdtech.jellyfin.models.CachedLibraryDto
++import dev.jdtech.jellyfin.models.CachedPersonDto
++import dev.jdtech.jellyfin.models.LibraryMediaDto
++import dev.jdtech.jellyfin.models.MediaGenreDto
++import dev.jdtech.jellyfin.models.MediaPersonDto
++import dev.jdtech.jellyfin.models.SimilarMediaDto
+ import dev.jdtech.jellyfin.models.Server
+ import dev.jdtech.jellyfin.models.ServerAddress
+ import dev.jdtech.jellyfin.models.User
+@@ -37,8 +44,15 @@ import dev.jdtech.jellyfin.models.User
+             FindroidUserDataDto::class,
+             FindroidTrickplayInfoDto::class,
+             FindroidSegmentDto::class,
++            MediaGenreDto::class,
++            MediaPersonDto::class,
++            SimilarMediaDto::class,
++            CachedLibraryDto::class,
++            CachedPersonDto::class,
++            CachedJellyfinItemDto::class,
++            LibraryMediaDto::class,
+         ],
+-    version = 8,
++    version = 9,
+     autoMigrations =
+         [
+             AutoMigration(from = 2, to = 3),
+@@ -46,6 +60,7 @@ import dev.jdtech.jellyfin.models.User
+             AutoMigration(from = 4, to = 5, spec = ServerDatabase.TrickplayMigration::class),
+             AutoMigration(from = 5, to = 6, spec = ServerDatabase.IntrosMigration::class),
+             AutoMigration(from = 7, to = 8),
++            AutoMigration(from = 8, to = 9),
+         ],
+ )
+ @ColumnTypeConverters(Converters::class)
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/database/ServerDatabaseDao.kt b/data/src/main/java/dev/jdtech/jellyfin/database/ServerDatabaseDao.kt
+index 9ea9f8e..91de05a 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/database/ServerDatabaseDao.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/database/ServerDatabaseDao.kt
+@@ -15,6 +15,13 @@ import dev.jdtech.jellyfin.models.FindroidShowDto
+ import dev.jdtech.jellyfin.models.FindroidSourceDto
+ import dev.jdtech.jellyfin.models.FindroidTrickplayInfoDto
+ import dev.jdtech.jellyfin.models.FindroidUserDataDto
++import dev.jdtech.jellyfin.models.CachedJellyfinItemDto
++import dev.jdtech.jellyfin.models.CachedLibraryDto
++import dev.jdtech.jellyfin.models.CachedPersonDto
++import dev.jdtech.jellyfin.models.LibraryMediaDto
++import dev.jdtech.jellyfin.models.MediaGenreDto
++import dev.jdtech.jellyfin.models.MediaPersonDto
++import dev.jdtech.jellyfin.models.SimilarMediaDto
+ import dev.jdtech.jellyfin.models.Server
+ import dev.jdtech.jellyfin.models.ServerAddress
+ import dev.jdtech.jellyfin.models.ServerWithAddressAndUser
+@@ -91,7 +98,7 @@ interface ServerDatabaseDao {
+     )
+     suspend fun getServerCurrentAddress(serverId: String): ServerAddress?
+ 
+-    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertMovie(movie: FindroidMovieDto)
++    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertMovie(movie: FindroidMovieDto)
+ 
+     @Insert(onConflict = OnConflictStrategy.REPLACE)
+     suspend fun insertSource(source: FindroidSourceDto)
+@@ -147,7 +154,7 @@ interface ServerDatabaseDao {
+     @Query("SELECT * FROM movies WHERE serverId = :serverId ORDER BY name ASC")
+     suspend fun getMoviesByServerId(serverId: String): List<FindroidMovieDto>
+ 
+-    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertShow(show: FindroidShowDto)
++    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertShow(show: FindroidShowDto)
+ 
+     @Query("SELECT * FROM shows WHERE id = :id") suspend fun getShow(id: UUID): FindroidShowDto
+ 
+@@ -158,7 +165,7 @@ interface ServerDatabaseDao {
+ 
+     @Query("DELETE FROM shows WHERE id = :id") suspend fun deleteShow(id: UUID)
+ 
+-    @Insert(onConflict = OnConflictStrategy.IGNORE)
++    @Insert(onConflict = OnConflictStrategy.REPLACE)
+     suspend fun insertSeason(show: FindroidSeasonDto)
+ 
+     @Query("SELECT * FROM seasons WHERE id = :id")
+@@ -169,7 +176,7 @@ interface ServerDatabaseDao {
+ 
+     @Query("DELETE FROM seasons WHERE id = :id") suspend fun deleteSeason(id: UUID)
+ 
+-    @Insert(onConflict = OnConflictStrategy.IGNORE)
++    @Insert(onConflict = OnConflictStrategy.REPLACE)
+     suspend fun insertEpisode(episode: FindroidEpisodeDto)
+ 
+     @Query("SELECT * FROM episodes WHERE id = :id")
+@@ -245,6 +252,108 @@ interface ServerDatabaseDao {
+     @Query("SELECT * FROM episodes WHERE serverId = :serverId AND name LIKE '%' || :name || '%'")
+     suspend fun searchEpisodes(serverId: String, name: String): List<FindroidEpisodeDto>
+ 
++
++
++    @Insert(onConflict = OnConflictStrategy.REPLACE)
++    suspend fun insertCachedJellyfinItem(item: CachedJellyfinItemDto)
++
++    @Query("SELECT * FROM cachedJellyfinItems WHERE serverId = :serverId AND itemId = :itemId")
++    suspend fun getCachedJellyfinItem(serverId: String, itemId: UUID): CachedJellyfinItemDto?
++
++    @Insert(onConflict = OnConflictStrategy.REPLACE)
++    suspend fun insertCachedLibraries(items: List<CachedLibraryDto>)
++
++    @Query("DELETE FROM cachedLibraries WHERE serverId = :serverId")
++    suspend fun deleteCachedLibraries(serverId: String)
++
++    @Query("SELECT * FROM cachedLibraries WHERE serverId = :serverId ORDER BY name COLLATE NOCASE")
++    suspend fun getCachedLibraries(serverId: String): List<CachedLibraryDto>
++
++    @Query("SELECT * FROM mediaPeople WHERE serverId = :serverId AND personId = :personId LIMIT 1")
++    suspend fun getCachedPerson(serverId: String, personId: UUID): MediaPersonDto?
++
++    @Query("SELECT * FROM mediaPeople WHERE serverId = :serverId AND personId = :personId")
++    suspend fun getPersonCredits(serverId: String, personId: UUID): List<MediaPersonDto>
++
++    @Query("SELECT DISTINCT itemId FROM mediaPeople WHERE serverId = :serverId AND personId IN (:personIds)")
++    suspend fun getItemIdsForPeople(serverId: String, personIds: List<UUID>): List<UUID>
++
++
++    @Insert(onConflict = OnConflictStrategy.REPLACE)
++    suspend fun insertLibraryMedia(items: List<LibraryMediaDto>)
++
++    @Query("DELETE FROM libraryMedia WHERE serverId = :serverId AND libraryId = :libraryId")
++    suspend fun deleteLibraryMedia(serverId: String, libraryId: UUID)
++
++    @Query("SELECT itemId FROM libraryMedia WHERE serverId = :serverId AND libraryId = :libraryId")
++    suspend fun getLibraryMediaIds(serverId: String, libraryId: UUID): List<UUID>
++
++    @Insert(onConflict = OnConflictStrategy.REPLACE)
++    suspend fun insertCachedPerson(person: CachedPersonDto)
++
++    @Query("SELECT * FROM cachedPeople WHERE serverId = :serverId AND id = :personId")
++    suspend fun getCachedPersonDetails(serverId: String, personId: UUID): CachedPersonDto?
++
++    @Query("SELECT genre FROM mediaGenres WHERE serverId = :serverId AND itemId = :itemId ORDER BY genre COLLATE NOCASE")
++    suspend fun getGenresForItem(serverId: String, itemId: UUID): List<String>
++
++    @Query("SELECT * FROM seasons WHERE id IN (:ids)")
++    suspend fun getSeasonsByIds(ids: List<UUID>): List<FindroidSeasonDto>
++
++    @Query("SELECT * FROM seasons")
++    suspend fun getAllSeasons(): List<FindroidSeasonDto>
++
++    @Insert(onConflict = OnConflictStrategy.REPLACE)
++    suspend fun insertMediaGenres(genres: List<MediaGenreDto>)
++
++    @Query("DELETE FROM mediaGenres WHERE serverId = :serverId AND itemId = :itemId")
++    suspend fun deleteMediaGenres(serverId: String, itemId: UUID)
++
++    @Query("SELECT DISTINCT genre FROM mediaGenres WHERE serverId = :serverId ORDER BY genre COLLATE NOCASE")
++    suspend fun getGenres(serverId: String): List<String>
++
++    @Query("SELECT itemId FROM mediaGenres WHERE serverId = :serverId AND genre = :genre")
++    suspend fun getMediaIdsForGenre(serverId: String, genre: String): List<UUID>
++
++    @Insert(onConflict = OnConflictStrategy.REPLACE)
++    suspend fun insertSimilarMedia(items: List<SimilarMediaDto>)
++
++    @Query("DELETE FROM similarMedia WHERE serverId = :serverId AND itemId = :itemId")
++    suspend fun deleteSimilarMedia(serverId: String, itemId: UUID)
++
++    @Query("SELECT similarItemId FROM similarMedia WHERE serverId = :serverId AND itemId = :itemId ORDER BY sortOrder ASC")
++    suspend fun getSimilarMediaIds(serverId: String, itemId: UUID): List<UUID>
++
++    @Insert(onConflict = OnConflictStrategy.REPLACE)
++    suspend fun insertMediaPeople(items: List<MediaPersonDto>)
++
++    @Query("DELETE FROM mediaPeople WHERE serverId = :serverId AND itemId = :itemId")
++    suspend fun deleteMediaPeople(serverId: String, itemId: UUID)
++
++    @Query("SELECT * FROM mediaPeople WHERE serverId = :serverId AND itemId = :itemId ORDER BY name COLLATE NOCASE ASC")
++    suspend fun getMediaPeople(serverId: String, itemId: UUID): List<MediaPersonDto>
++
++    @Query("SELECT * FROM movies WHERE id = :id")
++    suspend fun findMovie(id: UUID): FindroidMovieDto?
++
++    @Query("SELECT * FROM shows WHERE id = :id")
++    suspend fun findShow(id: UUID): FindroidShowDto?
++
++    @Query("SELECT * FROM movies WHERE serverId = :serverId ORDER BY name COLLATE NOCASE")
++    suspend fun getAllMovies(serverId: String): List<FindroidMovieDto>
++
++    @Query("SELECT * FROM shows WHERE serverId = :serverId ORDER BY name COLLATE NOCASE")
++    suspend fun getAllShows(serverId: String): List<FindroidShowDto>
++
++    @Query("SELECT * FROM episodes WHERE serverId = :serverId ORDER BY seriesName COLLATE NOCASE, parentIndexNumber, indexNumber")
++    suspend fun getAllEpisodes(serverId: String): List<FindroidEpisodeDto>
++
++    @Query("SELECT * FROM movies WHERE serverId = :serverId AND id IN (:ids)")
++    suspend fun getMoviesByIds(serverId: String, ids: List<UUID>): List<FindroidMovieDto>
++
++    @Query("SELECT * FROM shows WHERE serverId = :serverId AND id IN (:ids)")
++    suspend fun getShowsByIds(serverId: String, ids: List<UUID>): List<FindroidShowDto>
++
+     @Insert(onConflict = OnConflictStrategy.REPLACE)
+     suspend fun insertTrickplayInfo(trickplayInfoDto: FindroidTrickplayInfoDto)
+ 
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/models/CachedJellyfinItemDto.kt b/data/src/main/java/dev/jdtech/jellyfin/models/CachedJellyfinItemDto.kt
+new file mode 100644
+index 0000000..329f86c
+--- /dev/null
++++ b/data/src/main/java/dev/jdtech/jellyfin/models/CachedJellyfinItemDto.kt
+@@ -0,0 +1,21 @@
++package dev.jdtech.jellyfin.models
++
++import androidx.room3.Entity
++import androidx.room3.Index
++import java.util.UUID
++
++/**
++ * Full Jellyfin DTO snapshot. The typed movie/show/episode tables support the current UI while
++ * this JSON snapshot retains every field returned by the SDK for future offline detail screens.
++ */
++@Entity(
++    tableName = "cachedJellyfinItems",
++    primaryKeys = ["serverId", "itemId"],
++    indices = [Index(value = ["serverId"])],
++)
++data class CachedJellyfinItemDto(
++    val serverId: String,
++    val itemId: UUID,
++    val payload: String,
++    val syncedAt: Long,
++)
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/models/CachedLibraryDto.kt b/data/src/main/java/dev/jdtech/jellyfin/models/CachedLibraryDto.kt
+new file mode 100644
+index 0000000..a3af29d
+--- /dev/null
++++ b/data/src/main/java/dev/jdtech/jellyfin/models/CachedLibraryDto.kt
+@@ -0,0 +1,14 @@
++package dev.jdtech.jellyfin.models
++
++import androidx.room3.Entity
++import androidx.room3.Index
++import java.util.UUID
++
++@Entity(tableName = "cachedLibraries", primaryKeys = ["serverId", "id"], indices = [Index("serverId")])
++data class CachedLibraryDto(
++    val serverId: String,
++    val id: UUID,
++    val name: String,
++    val collectionType: String?,
++    val primaryImageTag: String?,
++)
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/models/CachedPersonDto.kt b/data/src/main/java/dev/jdtech/jellyfin/models/CachedPersonDto.kt
+new file mode 100644
+index 0000000..b5542f7
+--- /dev/null
++++ b/data/src/main/java/dev/jdtech/jellyfin/models/CachedPersonDto.kt
+@@ -0,0 +1,13 @@
++package dev.jdtech.jellyfin.models
++
++import androidx.room3.Entity
++import java.util.UUID
++
++@Entity(tableName = "cachedPeople", primaryKeys = ["serverId", "id"])
++data class CachedPersonDto(
++    val serverId: String,
++    val id: UUID,
++    val name: String,
++    val overview: String,
++    val primaryImageTag: String?,
++)
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/models/FindroidImages.kt b/data/src/main/java/dev/jdtech/jellyfin/models/FindroidImages.kt
+index 68ec22f..edbe90e 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/models/FindroidImages.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/models/FindroidImages.kt
+@@ -77,6 +77,7 @@ fun FindroidMovieDto.toLocalFindroidImages(itemId: UUID): FindroidImages {
+     return FindroidImages(
+         primary = Uri.Builder().appendEncodedPath("images/$itemId/primary").build(),
+         backdrop = Uri.Builder().appendEncodedPath("images/$itemId/backdrop").build(),
++        logo = Uri.Builder().appendEncodedPath("images/$itemId/logo").build(),
+     )
+ }
+ 
+@@ -84,6 +85,7 @@ fun FindroidShowDto.toLocalFindroidImages(itemId: UUID): FindroidImages {
+     return FindroidImages(
+         primary = Uri.Builder().appendEncodedPath("images/$itemId/primary").build(),
+         backdrop = Uri.Builder().appendEncodedPath("images/$itemId/backdrop").build(),
++        logo = Uri.Builder().appendEncodedPath("images/$itemId/logo").build(),
+     )
+ }
+ 
+@@ -91,6 +93,7 @@ fun FindroidSeasonDto.toLocalFindroidImages(itemId: UUID): FindroidImages {
+     return FindroidImages(
+         primary = Uri.Builder().appendEncodedPath("images/$itemId/primary").build(),
+         backdrop = Uri.Builder().appendEncodedPath("images/$itemId/backdrop").build(),
++        logo = Uri.Builder().appendEncodedPath("images/$itemId/logo").build(),
+         showPrimary = Uri.Builder().appendEncodedPath("images/$seriesId/primary").build(),
+         showBackdrop = Uri.Builder().appendEncodedPath("images/$seriesId/backdrop").build(),
+     )
+@@ -100,6 +103,7 @@ fun FindroidEpisodeDto.toLocalFindroidImages(itemId: UUID): FindroidImages {
+     return FindroidImages(
+         primary = Uri.Builder().appendEncodedPath("images/$itemId/primary").build(),
+         backdrop = Uri.Builder().appendEncodedPath("images/$itemId/backdrop").build(),
++        logo = Uri.Builder().appendEncodedPath("images/$itemId/logo").build(),
+         showPrimary = Uri.Builder().appendEncodedPath("images/$seriesId/primary").build(),
+         showBackdrop = Uri.Builder().appendEncodedPath("images/$seriesId/backdrop").build(),
+     )
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/models/FindroidItem.kt b/data/src/main/java/dev/jdtech/jellyfin/models/FindroidItem.kt
+index 6db3f85..dee30c0 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/models/FindroidItem.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/models/FindroidItem.kt
+@@ -6,6 +6,8 @@ import java.util.UUID
+ import org.jellyfin.sdk.model.api.BaseItemDto
+ import org.jellyfin.sdk.model.api.BaseItemKind
+ 
++enum class LocalMediaAvailability { LOCAL, SERVER_ONLY, UNKNOWN }
++
+ interface FindroidItem {
+     val id: UUID
+     val name: String
+@@ -21,6 +23,14 @@ interface FindroidItem {
+     val unplayedItemCount: Int?
+     val images: FindroidImages
+     val chapters: List<FindroidChapter>
++
++    /** Availability is derived from the folder scan, not stored as a permanent media property. */
++    val localMediaAvailability: LocalMediaAvailability
++        get() = when {
++            sources.any { it.type == FindroidSourceType.LOCAL } -> LocalMediaAvailability.LOCAL
++            sources.any { it.type == FindroidSourceType.UNKNOWN } -> LocalMediaAvailability.UNKNOWN
++            else -> LocalMediaAvailability.SERVER_ONLY
++        }
+ }
+ 
+ suspend fun BaseItemDto.toFindroidItem(
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/models/FindroidSource.kt b/data/src/main/java/dev/jdtech/jellyfin/models/FindroidSource.kt
+index 42f53b3..85afdfe 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/models/FindroidSource.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/models/FindroidSource.kt
+@@ -63,4 +63,6 @@ suspend fun FindroidSourceDto.toFindroidSource(
+ enum class FindroidSourceType {
+     REMOTE,
+     LOCAL,
++    /** A local folder scan could not be completed; this is never a playable source. */
++    UNKNOWN,
+ }
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/models/LibraryMediaDto.kt b/data/src/main/java/dev/jdtech/jellyfin/models/LibraryMediaDto.kt
+new file mode 100644
+index 0000000..3c30af0
+--- /dev/null
++++ b/data/src/main/java/dev/jdtech/jellyfin/models/LibraryMediaDto.kt
+@@ -0,0 +1,16 @@
++package dev.jdtech.jellyfin.models
++
++import androidx.room3.Entity
++import androidx.room3.Index
++import java.util.UUID
++
++@Entity(
++    tableName = "libraryMedia",
++    primaryKeys = ["serverId", "libraryId", "itemId"],
++    indices = [Index(value = ["serverId", "libraryId"])],
++)
++data class LibraryMediaDto(
++    val serverId: String,
++    val libraryId: UUID,
++    val itemId: UUID,
++)
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/models/MediaGenreDto.kt b/data/src/main/java/dev/jdtech/jellyfin/models/MediaGenreDto.kt
+new file mode 100644
+index 0000000..39efa23
+--- /dev/null
++++ b/data/src/main/java/dev/jdtech/jellyfin/models/MediaGenreDto.kt
+@@ -0,0 +1,17 @@
++package dev.jdtech.jellyfin.models
++
++import androidx.room3.Entity
++import androidx.room3.Index
++import java.util.UUID
++
++/** A normalized link between a cached Jellyfin item and one of its genres. */
++@Entity(
++    tableName = "mediaGenres",
++    primaryKeys = ["serverId", "itemId", "genre"],
++    indices = [Index(value = ["serverId", "genre"]), Index(value = ["itemId"])],
++)
++data class MediaGenreDto(
++    val serverId: String,
++    val itemId: UUID,
++    val genre: String,
++)
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/models/MediaPersonDto.kt b/data/src/main/java/dev/jdtech/jellyfin/models/MediaPersonDto.kt
+new file mode 100644
+index 0000000..6421936
+--- /dev/null
++++ b/data/src/main/java/dev/jdtech/jellyfin/models/MediaPersonDto.kt
+@@ -0,0 +1,21 @@
++package dev.jdtech.jellyfin.models
++
++import androidx.room3.Entity
++import androidx.room3.Index
++import java.util.UUID
++
++/** A lightweight snapshot of a person credit supplied with a Jellyfin item. */
++@Entity(
++    tableName = "mediaPeople",
++    primaryKeys = ["serverId", "itemId", "personId", "role"],
++    indices = [Index(value = ["serverId", "itemId"])],
++)
++data class MediaPersonDto(
++    val serverId: String,
++    val itemId: UUID,
++    val personId: UUID,
++    val name: String,
++    val type: String,
++    val role: String,
++    val primaryImageTag: String?,
++)
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/models/SimilarMediaDto.kt b/data/src/main/java/dev/jdtech/jellyfin/models/SimilarMediaDto.kt
+new file mode 100644
+index 0000000..919c1fc
+--- /dev/null
++++ b/data/src/main/java/dev/jdtech/jellyfin/models/SimilarMediaDto.kt
+@@ -0,0 +1,18 @@
++package dev.jdtech.jellyfin.models
++
++import androidx.room3.Entity
++import androidx.room3.Index
++import java.util.UUID
++
++/** Ordered Jellyfin recommendation edge, cached independently from local video files. */
++@Entity(
++    tableName = "similarMedia",
++    primaryKeys = ["serverId", "itemId", "similarItemId"],
++    indices = [Index(value = ["serverId", "itemId", "sortOrder"])],
++)
++data class SimilarMediaDto(
++    val serverId: String,
++    val itemId: UUID,
++    val similarItemId: UUID,
++    val sortOrder: Int,
++)
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepository.kt b/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepository.kt
+index 27d3b36..4ceaf6d 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepository.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepository.kt
+@@ -71,6 +71,12 @@ interface JellyfinRepository {
+ 
+     suspend fun getResumeItems(): List<FindroidItem>
+ 
++    suspend fun getGenreNames(): List<String>
++
++    suspend fun getGenreItems(genre: String): List<FindroidItem>
++
++    suspend fun getSimilarItems(itemId: UUID): List<FindroidItem>
++
+     suspend fun getLatestMedia(parentId: UUID): List<FindroidItem>
+ 
+     suspend fun getSeasons(seriesId: UUID, offline: Boolean = false): List<FindroidSeason>
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryImpl.kt b/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryImpl.kt
+index ecee6b4..1681b4d 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryImpl.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryImpl.kt
+@@ -15,6 +15,8 @@ import dev.jdtech.jellyfin.models.FindroidSeason
+ import dev.jdtech.jellyfin.models.FindroidSegment
+ import dev.jdtech.jellyfin.models.FindroidShow
+ import dev.jdtech.jellyfin.models.FindroidSource
++import dev.jdtech.jellyfin.models.MediaGenreDto
++import dev.jdtech.jellyfin.models.SimilarMediaDto
+ import dev.jdtech.jellyfin.models.SortBy
+ import dev.jdtech.jellyfin.models.SortOrder
+ import dev.jdtech.jellyfin.models.toFindroidCollection
+@@ -61,6 +63,7 @@ class JellyfinRepositoryImpl(
+     private val database: ServerDatabaseDao,
+     private val appPreferences: AppPreferences,
+     private val localFolderMediaResolver: LocalFolderMediaResolver,
++    private val offlineRepository: JellyfinRepositoryOfflineImpl,
+ ) : JellyfinRepository {
+     override suspend fun getPublicSystemInfo(): PublicSystemInfo =
+         withContext(Dispatchers.IO) { jellyfinApi.systemApi.getPublicSystemInfo().content }
+@@ -72,49 +75,91 @@ class JellyfinRepositoryImpl(
+ 
+     override suspend fun getEpisode(itemId: UUID): FindroidEpisode =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getItem(itemId, jellyfinApi.userId!!)
+-                .content
+-                .toFindroidEpisode(this@JellyfinRepositoryImpl, database)!!
++            try {
++                val episode = jellyfinApi.libraryApi
++                    .getItem(itemId, jellyfinApi.userId!!)
++                    .content
++                    .toFindroidEpisode(this@JellyfinRepositoryImpl, database)!!
++                val resolution = localFolderMediaResolver.resolveWithStatus(itemId, episode.name)
++                episode.copy(
++                    sources = episode.sources + listOfNotNull(
++                        resolution.source ?: if (!resolution.scanCompleted) localFolderMediaResolver.unknownSource(itemId, episode.name) else null
++                    )
++                )
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading episode $itemId from the offline cache")
++                offlineRepository.getEpisode(itemId)
++            }
+         }
+ 
+     override suspend fun getMovie(itemId: UUID): FindroidMovie =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getItem(itemId, jellyfinApi.userId!!)
+-                .content
+-                .toFindroidMovie(this@JellyfinRepositoryImpl, database)
++            try {
++                val movie = jellyfinApi.libraryApi
++                    .getItem(itemId, jellyfinApi.userId!!)
++                    .content
++                    .toFindroidMovie(this@JellyfinRepositoryImpl, database)
++                val resolution = localFolderMediaResolver.resolveWithStatus(itemId, movie.name)
++                movie.copy(
++                    sources = movie.sources + listOfNotNull(
++                        resolution.source ?: if (!resolution.scanCompleted) localFolderMediaResolver.unknownSource(itemId, movie.name) else null
++                    )
++                )
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading movie $itemId from the offline cache")
++                offlineRepository.getMovie(itemId)
++            }
+         }
+ 
+     override suspend fun getShow(itemId: UUID): FindroidShow =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getItem(itemId, jellyfinApi.userId!!)
+-                .content
+-                .toFindroidShow(this@JellyfinRepositoryImpl)
++            try {
++                jellyfinApi.libraryApi
++                    .getItem(itemId, jellyfinApi.userId!!)
++                    .content
++                    .toFindroidShow(this@JellyfinRepositoryImpl)
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading series $itemId from the offline cache")
++                offlineRepository.getShow(itemId)
++            }
+         }
+ 
+     override suspend fun getSeason(itemId: UUID): FindroidSeason =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getItem(itemId, jellyfinApi.userId!!)
+-                .content
+-                .toFindroidSeason(this@JellyfinRepositoryImpl)
++            try {
++                jellyfinApi.libraryApi
++                    .getItem(itemId, jellyfinApi.userId!!)
++                    .content
++                    .toFindroidSeason(this@JellyfinRepositoryImpl)
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading season $itemId from the offline cache")
++                offlineRepository.getSeason(itemId)
++            }
+         }
+ 
+     override suspend fun getLibraries(): List<FindroidCollection> =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi.getItems(jellyfinApi.userId!!).content.items.mapNotNull {
+-                it.toFindroidCollection(this@JellyfinRepositoryImpl)
++            try {
++                jellyfinApi.libraryApi.getItems(jellyfinApi.userId!!).content.items.mapNotNull {
++                    it.toFindroidCollection(this@JellyfinRepositoryImpl)
++                }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; using cached libraries")
++                offlineRepository.getLibraries()
+             }
+         }
+ 
+     override suspend fun getItem(itemId: UUID): FindroidItem? =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getItem(itemId = itemId, userId = jellyfinApi.userId!!)
+-                .content
+-                .toFindroidItem(this@JellyfinRepositoryImpl)
++            try {
++                jellyfinApi.libraryApi
++                    .getItem(itemId = itemId, userId = jellyfinApi.userId!!)
++                    .content
++                    .toFindroidItemWithAvailability()
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading item $itemId from the offline cache")
++                offlineRepository.getItem(itemId)
++            }
+         }
+ 
+     override suspend fun getItems(
+@@ -127,20 +172,25 @@ class JellyfinRepositoryImpl(
+         limit: Int?,
+     ): List<FindroidItem> =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getItems(
+-                    jellyfinApi.userId!!,
+-                    parentId = parentId,
+-                    includeItemTypes = includeTypes,
+-                    recursive = recursive,
+-                    sortBy = listOf(ItemSortBy.fromName(sortBy.sortString)),
+-                    sortOrder = listOf(ItemSortOrder.fromName(sortOrder.sortString)),
+-                    startIndex = startIndex,
+-                    limit = limit,
+-                )
+-                .content
+-                .items
+-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
++            try {
++                jellyfinApi.libraryApi
++                    .getItems(
++                        jellyfinApi.userId!!,
++                        parentId = parentId,
++                        includeItemTypes = includeTypes,
++                        recursive = recursive,
++                        sortBy = listOf(ItemSortBy.fromName(sortBy.sortString)),
++                        sortOrder = listOf(ItemSortOrder.fromName(sortOrder.sortString)),
++                        startIndex = startIndex,
++                        limit = limit,
++                    )
++                    .content
++                    .items
++                    .mapNotNull { it.toFindroidItemWithAvailability() }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading cached media items")
++                offlineRepository.getItems(parentId, includeTypes, recursive, sortBy, sortOrder, startIndex, limit)
++            }
+         }
+ 
+     override suspend fun getItemsPaging(
+@@ -161,10 +211,15 @@ class JellyfinRepositoryImpl(
+ 
+     override suspend fun getPerson(personId: UUID): FindroidPerson =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getItem(personId, jellyfinApi.userId!!)
+-                .content
+-                .toFindroidPerson(this@JellyfinRepositoryImpl)
++            try {
++                jellyfinApi.libraryApi
++                    .getItem(personId, jellyfinApi.userId!!)
++                    .content
++                    .toFindroidPerson(this@JellyfinRepositoryImpl)
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading cached person $personId")
++                offlineRepository.getPerson(personId)
++            }
+         }
+ 
+     override suspend fun getPersonItems(
+@@ -173,106 +228,234 @@ class JellyfinRepositoryImpl(
+         recursive: Boolean,
+     ): List<FindroidItem> =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getItems(
+-                    jellyfinApi.userId!!,
+-                    personIds = personIds,
+-                    includeItemTypes = includeTypes,
+-                    recursive = recursive,
+-                )
+-                .content
+-                .items
+-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
++            try {
++                jellyfinApi.libraryApi
++                    .getItems(
++                        jellyfinApi.userId!!,
++                        personIds = personIds,
++                        includeItemTypes = includeTypes,
++                        recursive = recursive,
++                    )
++                    .content
++                    .items
++                    .mapNotNull { it.toFindroidItemWithAvailability() }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading cached titles for person credits")
++                offlineRepository.getPersonItems(personIds, includeTypes, recursive)
++            }
+         }
+ 
+     override suspend fun getFavoriteItems(): List<FindroidItem> =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getItems(
+-                    jellyfinApi.userId!!,
+-                    filters = listOf(ItemFilter.IS_FAVORITE),
+-                    includeItemTypes =
+-                        listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES, BaseItemKind.EPISODE),
+-                    recursive = true,
+-                )
+-                .content
+-                .items
+-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
++            try {
++                jellyfinApi.libraryApi
++                    .getItems(
++                        jellyfinApi.userId!!,
++                        filters = listOf(ItemFilter.IS_FAVORITE),
++                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES, BaseItemKind.EPISODE),
++                        recursive = true,
++                    )
++                    .content
++                    .items
++                    .mapNotNull { it.toFindroidItemWithAvailability() }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; using cached favorites")
++                offlineRepository.getFavoriteItems()
++            }
+         }
+ 
+     override suspend fun getSearchItems(query: String): List<FindroidItem> =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getItems(
+-                    jellyfinApi.userId!!,
+-                    searchTerm = query,
+-                    includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
+-                    recursive = true,
+-                )
+-                .content
+-                .items
+-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
++            try {
++                jellyfinApi.libraryApi
++                    .getItems(
++                        jellyfinApi.userId!!,
++                        searchTerm = query,
++                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
++                        recursive = true,
++                    )
++                    .content
++                    .items
++                    .mapNotNull { it.toFindroidItemWithAvailability() }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; searching cached media")
++                offlineRepository.getSearchItems(query)
++            }
+         }
+ 
+     override suspend fun getSuggestions(): List<FindroidItem> =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.suggestionApi
+-                .getSuggestions(
+-                    jellyfinApi.userId!!,
+-                    limit = 6,
+-                    type = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
++            try {
++                jellyfinApi.suggestionApi
++                    .getSuggestions(
++                        jellyfinApi.userId!!,
++                        limit = 6,
++                        type = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
++                    )
++                    .content
++                    .items
++                    .mapNotNull { it.toFindroidItemWithAvailability() }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; using cached suggestions")
++                offlineRepository.getSuggestions()
++            }
++        }
++
++    override suspend fun getGenreNames(): List<String> =
++        withContext(Dispatchers.IO) {
++            try {
++                val serverId = appPreferences.getValue(appPreferences.currentServer)!!
++                val cachedGenres = database.getGenres(serverId)
++                if (cachedGenres.isNotEmpty()) return@withContext cachedGenres
++
++                // Populate the normalized genre index on the first home-screen visit.
++                var startIndex = 0
++                while (true) {
++                    val page = jellyfinApi.libraryApi.getItems(
++                        userId = jellyfinApi.userId!!,
++                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
++                        recursive = true,
++                        startIndex = startIndex,
++                        limit = 200,
++                        fields = listOf(ItemFields.GENRES),
++                    ).content
++                    if (page.items.isEmpty()) break
++                    page.items.forEach { item ->
++                        database.deleteMediaGenres(serverId, item.id)
++                        item.genres.orEmpty().distinct().filter(String::isNotBlank).takeIf { it.isNotEmpty() }?.let { genres ->
++                            database.insertMediaGenres(genres.map { MediaGenreDto(serverId, item.id, it) })
++                        }
++                    }
++                    startIndex += page.items.size
++                    if (page.items.size < 200 || startIndex >= page.totalRecordCount) break
++                }
++                database.getGenres(serverId)
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; using cached genres")
++                offlineRepository.getGenreNames()
++            }
++        }
++
++    override suspend fun getGenreItems(genre: String): List<FindroidItem> =
++        withContext(Dispatchers.IO) {
++            try {
++                val serverId = appPreferences.getValue(appPreferences.currentServer)!!
++                val ids = database.getMediaIdsForGenre(serverId, genre)
++                if (ids.isNotEmpty()) {
++                    ids.mapNotNull { id -> runCatching { getItem(id) }.getOrNull() }
++                        .filter { it is FindroidMovie || it is FindroidShow }
++                } else {
++                    jellyfinApi.libraryApi.getItems(
++                        userId = jellyfinApi.userId!!,
++                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
++                        recursive = true,
++                        genres = listOf(genre),
++                        fields = listOf(ItemFields.OVERVIEW, ItemFields.GENRES, ItemFields.PEOPLE),
++                    ).content.items.mapNotNull { it.toFindroidItemWithAvailability() }
++                }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading cached genre $genre")
++                offlineRepository.getGenreItems(genre)
++            }
++        }
++
++    override suspend fun getSimilarItems(itemId: UUID): List<FindroidItem> =
++        withContext(Dispatchers.IO) {
++            try {
++                val userId = jellyfinApi.userId!!
++                val serverId = appPreferences.getValue(appPreferences.currentServer)!!
++                val items =
++                    jellyfinApi.libraryApi
++                        .getSimilarItems(
++                            itemId = itemId,
++                            userId = userId,
++                            limit = 20,
++                            fields = listOf(ItemFields.OVERVIEW, ItemFields.GENRES, ItemFields.PEOPLE),
++                        )
++                        .content
++                        .items
++                database.deleteSimilarMedia(serverId, itemId)
++                val recommendations = items.filter { it.type == BaseItemKind.MOVIE || it.type == BaseItemKind.SERIES }
++                database.insertSimilarMedia(
++                    recommendations.mapIndexedNotNull { index, item ->
++                        if (item.id == itemId) null else SimilarMediaDto(serverId, itemId, item.id, index)
++                    }
+                 )
+-                .content
+-                .items
+-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
++                recommendations.mapNotNull { it.toFindroidItemWithAvailability() }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading cached similar items for $itemId")
++                offlineRepository.getSimilarItems(itemId)
++            }
+         }
+ 
+     override suspend fun getResumeItems(): List<FindroidItem> =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getResumeItems(
+-                    jellyfinApi.userId!!,
+-                    limit = 12,
+-                    includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.EPISODE),
+-                )
+-                .content
+-                .items
+-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
++            try {
++                jellyfinApi.libraryApi
++                    .getResumeItems(
++                        jellyfinApi.userId!!,
++                        limit = 12,
++                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.EPISODE),
++                    )
++                    .content
++                    .items
++                    .mapNotNull { it.toFindroidItemWithAvailability() }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; using cached resume items")
++                offlineRepository.getResumeItems()
++            }
+         }
+ 
+     override suspend fun getLatestMedia(parentId: UUID): List<FindroidItem> =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.libraryApi
+-                .getLatestMedia(jellyfinApi.userId!!, parentId = parentId, limit = 16)
+-                .content
+-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
++            try {
++                jellyfinApi.libraryApi
++                    .getLatestMedia(jellyfinApi.userId!!, parentId = parentId, limit = 16)
++                    .content
++                    .mapNotNull { it.toFindroidItemWithAvailability() }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading cached latest media for $parentId")
++                offlineRepository.getLatestMedia(parentId)
++            }
+         }
+ 
+     override suspend fun getSeasons(seriesId: UUID, offline: Boolean): List<FindroidSeason> =
+         withContext(Dispatchers.IO) {
+             if (!offline) {
+-                jellyfinApi.showApi.getSeasons(seriesId, jellyfinApi.userId!!).content.items.map {
+-                    it.toFindroidSeason(this@JellyfinRepositoryImpl)
++                try {
++                    jellyfinApi.showApi.getSeasons(seriesId, jellyfinApi.userId!!).content.items.map {
++                        it.toFindroidSeason(this@JellyfinRepositoryImpl)
++                    }
++                } catch (e: Exception) {
++                    Timber.w(e, "Jellyfin unavailable; loading cached seasons for $seriesId")
++                    offlineRepository.getSeasons(seriesId, offline = true)
+                 }
+             } else {
+-                database.getSeasonsByShowId(seriesId).map {
+-                    it.toFindroidSeason(database, jellyfinApi.userId!!)
+-                }
++                offlineRepository.getSeasons(seriesId, offline = true)
+             }
+         }
+ 
+     override suspend fun getNextUp(seriesId: UUID?): List<FindroidEpisode> =
+         withContext(Dispatchers.IO) {
+-            jellyfinApi.showApi
+-                .getNextUp(
+-                    jellyfinApi.userId!!,
+-                    limit = 24,
+-                    seriesId = seriesId,
+-                    enableResumable = false,
+-                )
+-                .content
+-                .items
+-                .mapNotNull { it.toFindroidEpisode(this@JellyfinRepositoryImpl) }
++            try {
++                jellyfinApi.showApi
++                    .getNextUp(
++                        jellyfinApi.userId!!,
++                        limit = 24,
++                        seriesId = seriesId,
++                        enableResumable = false,
++                    )
++                    .content
++                    .items
++                    .mapNotNull { episode ->
++                        episode.toFindroidEpisode(this@JellyfinRepositoryImpl)?.let { item ->
++                            item.withLocalFolderAvailability()
++                        }
++                    }
++            } catch (e: Exception) {
++                Timber.w(e, "Jellyfin unavailable; loading cached next-up episodes")
++                offlineRepository.getNextUp(seriesId)
++            }
+         }
+ 
+     override suspend fun getEpisodes(
+@@ -285,22 +468,29 @@ class JellyfinRepositoryImpl(
+     ): List<FindroidEpisode> =
+         withContext(Dispatchers.IO) {
+             if (!offline) {
+-                jellyfinApi.showApi
+-                    .getEpisodes(
+-                        seriesId,
+-                        jellyfinApi.userId!!,
+-                        seasonId = seasonId,
+-                        fields = fields,
+-                        startItemId = startItemId,
+-                        limit = limit,
+-                    )
+-                    .content
+-                    .items
+-                    .mapNotNull { it.toFindroidEpisode(this@JellyfinRepositoryImpl, database) }
+-            } else {
+-                database.getEpisodesBySeasonId(seasonId).map {
+-                    it.toFindroidEpisode(database, jellyfinApi.userId!!)
++                try {
++                    jellyfinApi.showApi
++                        .getEpisodes(
++                            seriesId,
++                            jellyfinApi.userId!!,
++                            seasonId = seasonId,
++                            fields = fields,
++                            startItemId = startItemId,
++                            limit = limit,
++                        )
++                        .content
++                        .items
++                        .mapNotNull { episode ->
++                            episode.toFindroidEpisode(this@JellyfinRepositoryImpl, database)?.let { item ->
++                                item.withLocalFolderAvailability()
++                            }
++                        }
++                } catch (e: Exception) {
++                    Timber.w(e, "Jellyfin unavailable; loading cached episodes for season $seasonId")
++                    offlineRepository.getEpisodes(seriesId, seasonId, fields, startItemId, limit, offline = true)
+                 }
++            } else {
++                offlineRepository.getEpisodes(seriesId, seasonId, fields, startItemId, limit, offline = true)
+             }
+         }
+ 
+@@ -319,7 +509,7 @@ class JellyfinRepositoryImpl(
+                     return@withContext listOf(it)
+                 }
+             }
+-            sources.addAll(
++            val remoteSources = try {
+                 jellyfinApi.mediaInfoApi
+                     .getPostedPlaybackInfo(
+                         itemId,
+@@ -346,7 +536,11 @@ class JellyfinRepositoryImpl(
+                     .content
+                     .mediaSources
+                     .map { it.toFindroidSource(this@JellyfinRepositoryImpl, itemId, includePath) }
+-            )
++            } catch (e: Exception) {
++                Timber.w(e, "Unable to contact Jellyfin for playback sources of $itemId")
++                emptyList()
++            }
++            sources.addAll(remoteSources)
+             sources.addAll(database.getSources(itemId).map { it.toFindroidSource(database) })
+             sources
+         }
+@@ -584,4 +778,29 @@ class JellyfinRepositoryImpl(
+     override fun getUserId(): UUID {
+         return jellyfinApi.userId!!
+     }
++
++    private suspend fun BaseItemDto.toFindroidItemWithAvailability(): FindroidItem? =
++        this.toFindroidItem(this@JellyfinRepositoryImpl, database)?.let { item ->
++            when (item) {
++                is FindroidMovie -> item.withLocalFolderAvailability()
++                is FindroidEpisode -> item.withLocalFolderAvailability()
++                else -> item
++            }
++        }
++
++    private suspend fun FindroidMovie.withLocalFolderAvailability(): FindroidMovie {
++        val resolution = localFolderMediaResolver.resolveWithStatus(id, name)
++        val marker = resolution.source ?: if (!resolution.scanCompleted) {
++            localFolderMediaResolver.unknownSource(id, name)
++        } else null
++        return copy(sources = sources + listOfNotNull(marker))
++    }
++
++    private suspend fun FindroidEpisode.withLocalFolderAvailability(): FindroidEpisode {
++        val resolution = localFolderMediaResolver.resolveWithStatus(id, name)
++        val marker = resolution.source ?: if (!resolution.scanCompleted) {
++            localFolderMediaResolver.unknownSource(id, name)
++        } else null
++        return copy(sources = sources + listOfNotNull(marker))
++    }
+ }
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryOfflineImpl.kt b/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryOfflineImpl.kt
+index 857f3f5..1b7cd37 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryOfflineImpl.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/repository/JellyfinRepositoryOfflineImpl.kt
+@@ -1,17 +1,22 @@
+ package dev.jdtech.jellyfin.repository
+ 
+ import android.content.Context
++import android.net.Uri
+ import androidx.paging.PagingData
+ import dev.jdtech.jellyfin.api.JellyfinApi
+ import dev.jdtech.jellyfin.database.ServerDatabaseDao
+ import dev.jdtech.jellyfin.models.FindroidCollection
+ import dev.jdtech.jellyfin.models.FindroidEpisode
+ import dev.jdtech.jellyfin.models.FindroidItem
+-import dev.jdtech.jellyfin.models.FindroidMovie
++import dev.jdtech.jellyfin.models.FindroidItemPerson
++import dev.jdtech.jellyfin.models.FindroidItemPersonImage
++import dev.jdtech.jellyfin.models.FindroidImages
+ import dev.jdtech.jellyfin.models.FindroidPerson
++import dev.jdtech.jellyfin.models.FindroidMovie
++import dev.jdtech.jellyfin.models.FindroidShow
++import dev.jdtech.jellyfin.models.CollectionType
+ import dev.jdtech.jellyfin.models.FindroidSeason
+ import dev.jdtech.jellyfin.models.FindroidSegment
+-import dev.jdtech.jellyfin.models.FindroidShow
+ import dev.jdtech.jellyfin.models.FindroidSource
+ import dev.jdtech.jellyfin.models.SortBy
+ import dev.jdtech.jellyfin.models.SortOrder
+@@ -26,12 +31,14 @@ import java.io.File
+ import java.util.UUID
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.flowOf
+ import kotlinx.coroutines.withContext
+ import org.jellyfin.sdk.model.api.BaseItemDto
+ import org.jellyfin.sdk.model.api.BaseItemKind
+ import org.jellyfin.sdk.model.api.ItemFields
+ import org.jellyfin.sdk.model.api.PublicSystemInfo
+ import org.jellyfin.sdk.model.api.UserConfiguration
++import org.jellyfin.sdk.model.api.PersonKind
+ 
+ class JellyfinRepositoryOfflineImpl(
+     private val context: Context,
+@@ -52,34 +59,62 @@ class JellyfinRepositoryOfflineImpl(
+     override suspend fun getMovie(itemId: UUID): FindroidMovie =
+         withContext(Dispatchers.IO) {
+             val movie = database.getMovie(itemId).toFindroidMovie(database, jellyfinApi.userId!!)
+-            val localSource = localFolderMediaResolver.resolve(itemId, movie.name)
+-            if (localSource != null) movie.copy(sources = movie.sources + localSource) else movie
++            val resolution = localFolderMediaResolver.resolveWithStatus(itemId, movie.name)
++            movie.copy(
++                sources = movie.sources + listOfNotNull(resolution.source ?: if (!resolution.scanCompleted) localFolderMediaResolver.unknownSource(itemId, movie.name) else null),
++                genres = database.getGenresForItem(currentServerId(), itemId),
++                people = getCachedPeople(itemId),
++                images = cachedImages(itemId),
++            )
+         }
+ 
+     override suspend fun getShow(itemId: UUID): FindroidShow =
+         withContext(Dispatchers.IO) {
+-            database.getShow(itemId).toFindroidShow(database, jellyfinApi.userId!!)
++            database.getShow(itemId).toFindroidShow(database, jellyfinApi.userId!!).copy(
++                genres = database.getGenresForItem(currentServerId(), itemId),
++                people = getCachedPeople(itemId),
++                images = cachedImages(itemId),
++            )
+         }
+ 
+     override suspend fun getSeason(itemId: UUID): FindroidSeason =
+         withContext(Dispatchers.IO) {
+-            database.getSeason(itemId).toFindroidSeason(database, jellyfinApi.userId!!)
++            database.getSeason(itemId).toFindroidSeason(database, jellyfinApi.userId!!).let { season ->
++                season.copy(images = cachedImages(itemId, season.seriesId))
++            }
+         }
+ 
+     override suspend fun getEpisode(itemId: UUID): FindroidEpisode =
+         withContext(Dispatchers.IO) {
+             val episode = database.getEpisode(itemId).toFindroidEpisode(database, jellyfinApi.userId!!)
+-            val localSource = localFolderMediaResolver.resolve(itemId, episode.name)
+-            if (localSource != null) episode.copy(sources = episode.sources + localSource) else episode
++            val resolution = localFolderMediaResolver.resolveWithStatus(itemId, episode.name)
++            episode.copy(
++                sources = episode.sources + listOfNotNull(resolution.source ?: if (!resolution.scanCompleted) localFolderMediaResolver.unknownSource(itemId, episode.name) else null),
++                people = getCachedPeople(itemId),
++                images = cachedImages(itemId, episode.seriesId),
++            )
+         }
+ 
+-    override suspend fun getLibraries(): List<FindroidCollection> {
+-        return emptyList()
+-    }
++    override suspend fun getLibraries(): List<FindroidCollection> =
++        withContext(Dispatchers.IO) {
++            database.getCachedLibraries(currentServerId()).map { library ->
++                val image = File(context.filesDir, "images/${library.id}/primary")
++                FindroidCollection(
++                    id = library.id,
++                    name = library.name,
++                    type = CollectionType.fromString(library.collectionType),
++                    images = FindroidImages(primary = image.takeIf { it.exists() }?.let { Uri.fromFile(it) }),
++                )
++            }
++        }
+ 
+-    override suspend fun getItem(itemId: UUID): FindroidItem? {
+-        return null
+-    }
++    override suspend fun getItem(itemId: UUID): FindroidItem? =
++        withContext(Dispatchers.IO) {
++            runCatching { getMovie(itemId) }.getOrNull()
++                ?: runCatching { getShow(itemId) }.getOrNull()
++                ?: runCatching { getSeason(itemId) }.getOrNull()
++                ?: runCatching { getEpisode(itemId) }.getOrNull()
++        }
+ 
+     override suspend fun getItems(
+         parentId: UUID?,
+@@ -89,9 +124,39 @@ class JellyfinRepositoryOfflineImpl(
+         sortOrder: SortOrder,
+         startIndex: Int?,
+         limit: Int?,
+-    ): List<FindroidItem> {
+-        return emptyList()
+-    }
++    ): List<FindroidItem> =
++        withContext(Dispatchers.IO) {
++            val serverId = currentServerId()
++            val allowed = includeTypes?.toSet()
++            val allMovies = database.getAllMovies(serverId)
++            val allShows = database.getAllShows(serverId)
++            val allEpisodes = database.getAllEpisodes(serverId)
++            val allSeasons = database.getAllSeasons().filter { it.seriesId in database.getShowsByServerId(serverId).map { show -> show.id }.toSet() }
++            val libraryIds =
++                if (parentId != null && database.getCachedLibraries(serverId).any { it.id == parentId }) {
++                    database.getLibraryMediaIds(serverId, parentId)
++                } else null
++            val candidates = mutableListOf<FindroidItem>()
++            if (allowed == null || BaseItemKind.MOVIE in allowed) {
++                candidates += allMovies.filter { libraryIds == null || it.id in libraryIds }
++                    .mapNotNull { runCatching { getMovie(it.id) }.getOrNull() }
++            }
++            if (allowed == null || BaseItemKind.SERIES in allowed) {
++                candidates += allShows.filter { libraryIds == null || it.id in libraryIds }
++                    .mapNotNull { runCatching { getShow(it.id) }.getOrNull() }
++            }
++            if (recursive && (allowed == null || BaseItemKind.EPISODE in allowed)) {
++                candidates += allEpisodes.filter { libraryIds == null || it.id in libraryIds }
++                    .mapNotNull { runCatching { getEpisode(it.id) }.getOrNull() }
++            }
++            if (allowed == null || BaseItemKind.SEASON in allowed) {
++                candidates += allSeasons.filter { libraryIds == null || it.id in libraryIds }
++                    .map { it.toFindroidSeason(database, jellyfinApi.userId!!) }
++            }
++            val sorted = if (sortOrder == SortOrder.DESCENDING) candidates.sortedByDescending { it.name.lowercase() }
++                else candidates.sortedBy { it.name.lowercase() }
++            sorted.drop(startIndex ?: 0).let { items -> if (limit != null) items.take(limit) else items }
++        }
+ 
+     override suspend fun getItemsPaging(
+         parentId: UUID?,
+@@ -100,66 +165,96 @@ class JellyfinRepositoryOfflineImpl(
+         sortBy: SortBy,
+         sortOrder: SortOrder,
+     ): Flow<PagingData<FindroidItem>> {
+-        TODO("Not yet implemented")
++        return flowOf(PagingData.from(getItems(parentId, includeTypes, recursive, sortBy, sortOrder)))
+     }
+ 
+-    override suspend fun getPerson(personId: UUID): FindroidPerson {
+-        TODO("Not yet implemented")
+-    }
++    override suspend fun getPerson(personId: UUID): FindroidPerson =
++        withContext(Dispatchers.IO) {
++            val person = database.getCachedPersonDetails(currentServerId(), personId)
++                ?: throw IllegalStateException("Person is not cached for offline use")
++            val image = File(context.filesDir, "images/people/$personId/primary")
++            FindroidPerson(
++                id = personId,
++                name = person.name,
++                overview = person.overview,
++                images = FindroidImages(primary = image.takeIf { it.exists() }?.let { Uri.fromFile(it) }),
++            )
++        }
+ 
+     override suspend fun getPersonItems(
+         personIds: List<UUID>,
+         includeTypes: List<BaseItemKind>?,
+         recursive: Boolean,
+-    ): List<FindroidItem> {
+-        TODO("Not yet implemented")
+-    }
++    ): List<FindroidItem> =
++        withContext(Dispatchers.IO) {
++            if (personIds.isEmpty()) return@withContext emptyList()
++            database.getItemIdsForPeople(currentServerId(), personIds).distinct().mapNotNull { getItem(it) }
++                .filter { includeTypes == null || includeTypes.any { kind ->
++                    when (kind) {
++                        BaseItemKind.MOVIE -> it is FindroidMovie
++                        BaseItemKind.SERIES -> it is FindroidShow
++                        BaseItemKind.EPISODE -> it is FindroidEpisode
++                        else -> false
++                    }
++                } }
++        }
+ 
+-    override suspend fun getFavoriteItems(): List<FindroidItem> {
+-        TODO("Not yet implemented")
+-    }
++    override suspend fun getFavoriteItems(): List<FindroidItem> =
++        getItems(includeTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES, BaseItemKind.EPISODE), recursive = true)
++            .filter { it.favorite }
+ 
+     override suspend fun getSearchItems(query: String): List<FindroidItem> {
+         return withContext(Dispatchers.IO) {
+-            val movies =
+-                database
+-                    .searchMovies(appPreferences.getValue(appPreferences.currentServer)!!, query)
+-                    .map { it.toFindroidMovie(database, jellyfinApi.userId!!) }
+-            val shows =
+-                database
+-                    .searchShows(appPreferences.getValue(appPreferences.currentServer)!!, query)
+-                    .map { it.toFindroidShow(database, jellyfinApi.userId!!) }
+-            val episodes =
+-                database
+-                    .searchEpisodes(appPreferences.getValue(appPreferences.currentServer)!!, query)
+-                    .map { it.toFindroidEpisode(database, jellyfinApi.userId!!) }
++            val serverId = currentServerId()
++            val movies = database.searchMovies(serverId, query).mapNotNull { runCatching { getMovie(it.id) }.getOrNull() }
++            val shows = database.searchShows(serverId, query).mapNotNull { runCatching { getShow(it.id) }.getOrNull() }
++            val episodes = database.searchEpisodes(serverId, query).mapNotNull { runCatching { getEpisode(it.id) }.getOrNull() }
+             movies + shows + episodes
+         }
+     }
+ 
+-    override suspend fun getSuggestions(): List<FindroidItem> {
+-        return emptyList()
+-    }
++    override suspend fun getSuggestions(): List<FindroidItem> =
++        getItems(includeTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES)).take(6)
++
++    override suspend fun getGenreNames(): List<String> =
++        withContext(Dispatchers.IO) { database.getGenres(currentServerId()) }
++
++    override suspend fun getGenreItems(genre: String): List<FindroidItem> =
++        withContext(Dispatchers.IO) {
++            database.getMediaIdsForGenre(currentServerId(), genre).distinct().mapNotNull { id ->
++                runCatching { getMovie(id) }.getOrNull() ?: runCatching { getShow(id) }.getOrNull()
++            }
++        }
++
++    override suspend fun getSimilarItems(itemId: UUID): List<FindroidItem> =
++        withContext(Dispatchers.IO) {
++            database.getSimilarMediaIds(currentServerId(), itemId)
++                .mapNotNull { id -> getItem(id) }
++                .filter { it is FindroidMovie || it is FindroidShow }
++        }
+ 
+     override suspend fun getResumeItems(): List<FindroidItem> {
+         return withContext(Dispatchers.IO) {
+-            val movies =
+-                database
+-                    .getMoviesByServerId(appPreferences.getValue(appPreferences.currentServer)!!)
+-                    .map { it.toFindroidMovie(database, jellyfinApi.userId!!) }
+-                    .filter { it.playbackPositionTicks > 0 }
+-            val episodes =
+-                database
+-                    .getEpisodesByServerId(appPreferences.getValue(appPreferences.currentServer)!!)
+-                    .map { it.toFindroidEpisode(database, jellyfinApi.userId!!) }
+-                    .filter { it.playbackPositionTicks > 0 }
++            val serverId = currentServerId()
++            val movies = database.getMoviesByServerId(serverId)
++                .filter { runCatching { database.getUserDataOrCreateNew(it.id, jellyfinApi.userId!!).playbackPositionTicks > 0 }.getOrDefault(false) }
++                .mapNotNull { runCatching { getMovie(it.id) }.getOrNull() }
++                .filter { it.playbackPositionTicks > 0 }
++            val episodes = database.getEpisodesByServerId(serverId)
++                .filter { runCatching { database.getUserDataOrCreateNew(it.id, jellyfinApi.userId!!).playbackPositionTicks > 0 }.getOrDefault(false) }
++                .mapNotNull { runCatching { getEpisode(it.id) }.getOrNull() }
++                .filter { it.playbackPositionTicks > 0 }
+             movies + episodes
+         }
+     }
+ 
+-    override suspend fun getLatestMedia(parentId: UUID): List<FindroidItem> {
+-        return emptyList()
+-    }
++    override suspend fun getLatestMedia(parentId: UUID): List<FindroidItem> =
++        getItems(
++            parentId = parentId,
++            includeTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES, BaseItemKind.EPISODE),
++            recursive = true,
++            limit = 16,
++        )
+ 
+     override suspend fun getSeasons(seriesId: UUID, offline: Boolean): List<FindroidSeason> =
+         withContext(Dispatchers.IO) {
+@@ -181,6 +276,7 @@ class JellyfinRepositoryOfflineImpl(
+                         it.toFindroidEpisode(database, jellyfinApi.userId!!)
+                     }
+                 val indexOfLastPlayed = episodes.indexOfLast { it.played }
++                if (episodes.isEmpty()) continue
+                 if (indexOfLastPlayed == -1) {
+                     result.add(episodes.first())
+                 } else {
+@@ -208,17 +304,50 @@ class JellyfinRepositoryOfflineImpl(
+             items
+         }
+ 
++    private fun cachedImages(itemId: UUID, seriesId: UUID? = null): FindroidImages {
++        fun image(ownerId: UUID, type: String): Uri? =
++            File(context.filesDir, "images/$ownerId/$type")
++                .takeIf { it.isFile }
++                ?.let(Uri::fromFile)
++
++        return FindroidImages(
++            primary = image(itemId, "primary"),
++            backdrop = image(itemId, "backdrop"),
++            logo = image(itemId, "logo"),
++            showPrimary = seriesId?.let { image(it, "primary") },
++            showBackdrop = seriesId?.let { image(it, "backdrop") },
++            showLogo = seriesId?.let { image(it, "logo") },
++        )
++    }
++
++    private fun currentServerId(): String =
++        appPreferences.getValue(appPreferences.currentServer)
++            ?: throw IllegalStateException("No current Jellyfin server selected")
++
++    private suspend fun getCachedPeople(itemId: UUID): List<FindroidItemPerson> =
++        database.getMediaPeople(currentServerId(), itemId).mapNotNull { person ->
++            val kind = runCatching { PersonKind.valueOf(person.type.uppercase()) }.getOrNull() ?: return@mapNotNull null
++            val imageFile = File(context.filesDir, "images/people/${person.personId}/primary")
++            val uri = imageFile.takeIf { it.exists() }?.let { Uri.fromFile(it) }
++            FindroidItemPerson(
++                id = person.personId,
++                name = person.name,
++                type = kind,
++                role = person.role,
++                image = FindroidItemPersonImage(uri, null),
++            )
++        }
++
+     override suspend fun getMediaSources(itemId: UUID, includePath: Boolean): List<FindroidSource> =
+         withContext(Dispatchers.IO) {
+             val itemName =
+                 runCatching { database.getMovie(itemId).name }.getOrNull()
+                     ?: runCatching { database.getEpisode(itemId).name }.getOrNull()
+                     ?: ""
+-            val localFolderSource =
+-                if (itemName.isNotBlank()) localFolderMediaResolver.resolve(itemId, itemName)
+-                else null
++            val resolution = if (itemName.isNotBlank()) localFolderMediaResolver.resolveWithStatus(itemId, itemName) else null
+             buildList {
+-                localFolderSource?.let(::add)
++                resolution?.source?.let(::add)
++                if (resolution != null && !resolution.scanCompleted) add(localFolderMediaResolver.unknownSource(itemId, itemName))
+                 addAll(database.getSources(itemId).map { it.toFindroidSource(database) })
+             }
+         }
+diff --git a/data/src/main/java/dev/jdtech/jellyfin/repository/LocalFolderMediaResolver.kt b/data/src/main/java/dev/jdtech/jellyfin/repository/LocalFolderMediaResolver.kt
+index 196e916..2f5b16a 100644
+--- a/data/src/main/java/dev/jdtech/jellyfin/repository/LocalFolderMediaResolver.kt
++++ b/data/src/main/java/dev/jdtech/jellyfin/repository/LocalFolderMediaResolver.kt
+@@ -1,9 +1,9 @@
+ package dev.jdtech.jellyfin.repository
+ 
+-import android.content.ContentUris
+ import android.content.Context
+ import android.net.Uri
+ import android.provider.DocumentsContract
++import dagger.hilt.android.qualifiers.ApplicationContext
+ import dev.jdtech.jellyfin.models.FindroidMediaStream
+ import dev.jdtech.jellyfin.models.FindroidSource
+ import dev.jdtech.jellyfin.models.FindroidSourceType
+@@ -29,10 +29,19 @@ constructor(
+     @ApplicationContext private val context: Context,
+     private val preferences: AppPreferences,
+ ) {
++    data class Resolution(
++        val source: FindroidSource? = null,
++        val scanCompleted: Boolean,
++    )
++
+     suspend fun resolve(itemId: UUID, itemName: String): FindroidSource? =
++        resolveWithStatus(itemId, itemName).source
++
++    /** A missing match is distinct from a folder that could not be inspected. */
++    suspend fun resolveWithStatus(itemId: UUID, itemName: String): Resolution =
+         withContext(Dispatchers.IO) {
+             val tree = preferences.getValue(preferences.localMediaFolder)?.let(Uri::parse)
+-                ?: return@withContext null
++                ?: return@withContext Resolution(scanCompleted = false)
+             try {
+                 val rootId = DocumentsContract.getTreeDocumentId(tree)
+                 val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, rootId)
+@@ -42,7 +51,9 @@ constructor(
+                     DocumentsContract.Document.COLUMN_MIME_TYPE,
+                 )
+                 val target = normalize(itemName)
+-                context.contentResolver.query(childrenUri, projection, null, null, null)?.use { c ->
++                val cursor = context.contentResolver.query(childrenUri, projection, null, null, null)
++                    ?: return@withContext Resolution(scanCompleted = false)
++                cursor.use { c ->
+                     val idColumn = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                     val nameColumn = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                     val mimeColumn = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+@@ -53,32 +64,46 @@ constructor(
+                         if (!isVideo(displayName, mime)) continue
+                         val candidate = normalize(displayName.substringBeforeLast('.', displayName))
+                         val exactMatch = candidate == target
+-                        val yearSuffixMatch =
+-                            candidate.matches(Regex("${Regex.escape(target)}(19|20)\\\\d{2}"))
++                        val yearSuffixMatch = candidate.matches(Regex("${Regex.escape(target)}(19|20)\\d{2}"))
+                         if (!exactMatch && !yearSuffixMatch) continue
+ 
+                         val documentUri = DocumentsContract.buildDocumentUriUsingTree(
+                             tree,
+                             c.getString(idColumn),
+                         )
+-                        return@withContext FindroidSource(
+-                            id = "local-folder-$itemId",
+-                            name = displayName,
+-                            type = FindroidSourceType.LOCAL,
+-                            path = documentUri.toString(),
+-                            size = 0L,
+-                            mediaStreams = emptyList<FindroidMediaStream>(),
++                        return@withContext Resolution(
++                            source = FindroidSource(
++                                id = "local-folder-$itemId",
++                                name = displayName,
++                                type = FindroidSourceType.LOCAL,
++                                path = documentUri.toString(),
++                                size = 0L,
++                                mediaStreams = emptyList<FindroidMediaStream>(),
++                            ),
++                            scanCompleted = true,
+                         )
+                     }
+                 }
++                Resolution(scanCompleted = true)
+             } catch (e: SecurityException) {
+                 Timber.w(e, "Local media folder permission is no longer available")
++                Resolution(scanCompleted = false)
+             } catch (e: Exception) {
+                 Timber.w(e, "Unable to resolve local media for $itemId")
++                Resolution(scanCompleted = false)
+             }
+-            null
+         }
+ 
++    fun unknownSource(itemId: UUID, itemName: String): FindroidSource =
++        FindroidSource(
++            id = "local-folder-unknown-$itemId",
++            name = itemName,
++            type = FindroidSourceType.UNKNOWN,
++            path = "",
++            size = 0L,
++            mediaStreams = emptyList(),
++        )
++
+     private fun normalize(value: String): String =
+         value.substringBeforeLast('.', value)
+             .lowercase(Locale.ROOT)
+diff --git a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/GenreState.kt b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/GenreState.kt
+new file mode 100644
+index 0000000..988ba43
+--- /dev/null
++++ b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/GenreState.kt
+@@ -0,0 +1,9 @@
++package dev.jdtech.jellyfin.film.presentation.home
++
++import dev.jdtech.jellyfin.models.FindroidItem
++
++data class GenreState(
++    val items: List<FindroidItem> = emptyList(),
++    val isLoading: Boolean = false,
++    val error: Exception? = null,
++)
+diff --git a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/GenreViewModel.kt b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/GenreViewModel.kt
+new file mode 100644
+index 0000000..60b3b29
+--- /dev/null
++++ b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/GenreViewModel.kt
+@@ -0,0 +1,28 @@
++package dev.jdtech.jellyfin.film.presentation.home
++
++import androidx.lifecycle.ViewModel
++import androidx.lifecycle.viewModelScope
++import dagger.hilt.android.lifecycle.HiltViewModel
++import dev.jdtech.jellyfin.repository.JellyfinRepository
++import javax.inject.Inject
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.launch
++
++@HiltViewModel
++class GenreViewModel @Inject constructor(private val repository: JellyfinRepository) : ViewModel() {
++    private val _state = MutableStateFlow(GenreState())
++    val state = _state.asStateFlow()
++
++    fun load(genre: String) {
++        viewModelScope.launch(Dispatchers.IO) {
++            _state.emit(_state.value.copy(isLoading = true, error = null))
++            try {
++                _state.emit(_state.value.copy(items = repository.getGenreItems(genre), isLoading = false))
++            } catch (e: Exception) {
++                _state.emit(_state.value.copy(isLoading = false, error = e))
++            }
++        }
++    }
++}
+diff --git a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeAction.kt b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeAction.kt
+index 1fed3c2..9227068 100644
+--- a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeAction.kt
++++ b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeAction.kt
+@@ -8,6 +8,8 @@ sealed interface HomeAction {
+ 
+     data class OnLibraryClick(val library: FindroidCollection) : HomeAction
+ 
++    data class OnGenreClick(val genre: String) : HomeAction
++
+     data object OnRetryClick : HomeAction
+ 
+     data object OnSearchClick : HomeAction
+diff --git a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeState.kt b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeState.kt
+index e5804ed..7520ca2 100644
+--- a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeState.kt
++++ b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeState.kt
+@@ -9,6 +9,7 @@ data class HomeState(
+     val resumeSection: HomeItem.Section? = null,
+     val nextUpSection: HomeItem.Section? = null,
+     val views: List<HomeItem.ViewItem> = emptyList(),
++    val genreSections: List<dev.jdtech.jellyfin.models.HomeSection> = emptyList(),
+     val isLoading: Boolean = false,
+     val error: Exception? = null,
+ )
+diff --git a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeViewModel.kt b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeViewModel.kt
+index 068978d..b520136 100644
+--- a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeViewModel.kt
++++ b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/home/HomeViewModel.kt
+@@ -8,11 +8,15 @@ import dev.jdtech.jellyfin.film.R as FilmR
+ import dev.jdtech.jellyfin.models.CollectionType
+ import dev.jdtech.jellyfin.models.HomeItem
+ import dev.jdtech.jellyfin.models.HomeSection
++import dev.jdtech.jellyfin.models.View
+ import dev.jdtech.jellyfin.models.UiText
+ import dev.jdtech.jellyfin.repository.JellyfinRepository
+ import dev.jdtech.jellyfin.settings.domain.AppPreferences
+ import dev.jdtech.jellyfin.utils.toView
+ import java.util.UUID
++import dev.jdtech.jellyfin.models.FindroidItem
++import dev.jdtech.jellyfin.models.FindroidMovie
++import dev.jdtech.jellyfin.models.FindroidShow
+ import javax.inject.Inject
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.flow.MutableStateFlow
+@@ -52,6 +56,7 @@ constructor(
+                 loadSuggestions()
+                 loadResumeItems()
+                 loadNextUpItems()
++                loadGenreItems()
+                 loadViews()
+             } catch (e: Exception) {
+                 _state.emit(_state.value.copy(error = e))
+@@ -126,20 +131,53 @@ constructor(
+         _state.emit(_state.value.copy(nextUpSection = section))
+     }
+ 
++    private suspend fun loadGenreItems() {
++        val sections =
++            repository.getGenreNames().mapNotNull { genre ->
++                val items =
++                    repository.getGenreItems(genre)
++                        .filter { it is FindroidMovie || it is FindroidShow }
++                        .take(20)
++                if (items.isEmpty()) null
++                else HomeSection(
++                    id = UUID.nameUUIDFromBytes("findroid-genre:$genre".toByteArray()),
++                    name = UiText.DynamicString(genre),
++                    items = items,
++                )
++            }
++        _state.emit(_state.value.copy(genreSections = sections))
++    }
++
+     private suspend fun loadViews() {
+         Timber.i("Loading views")
+         val items =
+             if (appPreferences.getValue(appPreferences.homeLatest)) {
+-                repository
+-                    .getUserViews()
+-                    .filter { view ->
+-                        CollectionType.fromString(view.collectionType?.serialName) in
+-                            CollectionType.supported
++                if (appPreferences.getValue(appPreferences.offlineMode)) {
++                    repository.getLibraries().mapNotNull { library ->
++                        val latest = repository.getLatestMedia(library.id)
++                        if (latest.isEmpty()) null
++                        else HomeItem.ViewItem(View(library.id, library.name, latest, library.type))
++                    }
++                } else {
++                    val remoteViews = runCatching { repository.getUserViews() }.getOrNull()
++                    if (remoteViews != null) {
++                        remoteViews
++                            .filter { view ->
++                                CollectionType.fromString(view.collectionType?.serialName) in
++                                    CollectionType.supported
++                            }
++                            .map { view -> view to repository.getLatestMedia(view.id) }
++                            .filter { (_, latest) -> latest.isNotEmpty() }
++                            .map { (view, latest) -> view.toView(latest) }
++                            .map { HomeItem.ViewItem(it) }
++                    } else {
++                        repository.getLibraries().mapNotNull { library ->
++                            val latest = repository.getLatestMedia(library.id)
++                            if (latest.isEmpty()) null
++                            else HomeItem.ViewItem(View(library.id, library.name, latest, library.type))
++                        }
+                     }
+-                    .map { view -> view to repository.getLatestMedia(view.id) }
+-                    .filter { (_, latest) -> latest.isNotEmpty() }
+-                    .map { (view, latest) -> view.toView(latest) }
+-                    .map { HomeItem.ViewItem(it) }
++                }
+             } else {
+                 emptyList()
+             }
+diff --git a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/movie/MovieState.kt b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/movie/MovieState.kt
+index a456710..3dc2f0f 100644
+--- a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/movie/MovieState.kt
++++ b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/movie/MovieState.kt
+@@ -2,10 +2,12 @@ package dev.jdtech.jellyfin.film.presentation.movie
+ 
+ import dev.jdtech.jellyfin.models.FindroidItemPerson
+ import dev.jdtech.jellyfin.models.FindroidMovie
++import dev.jdtech.jellyfin.models.FindroidItem
+ import dev.jdtech.jellyfin.models.VideoMetadata
+ 
+ data class MovieState(
+     val movie: FindroidMovie? = null,
++    val similarItems: List<FindroidItem> = emptyList(),
+     val videoMetadata: VideoMetadata? = null,
+     val actors: List<FindroidItemPerson> = emptyList(),
+     val director: FindroidItemPerson? = null,
+diff --git a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/movie/MovieViewModel.kt b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/movie/MovieViewModel.kt
+index 029ac5d..da44c01 100644
+--- a/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/movie/MovieViewModel.kt
++++ b/modes/film/src/main/java/dev/jdtech/jellyfin/film/presentation/movie/MovieViewModel.kt
+@@ -35,7 +35,9 @@ constructor(
+         viewModelScope.launch {
+             try {
+                 val movie = repository.getMovie(movieId)
+-                val videoMetadata = videoMetadataParser.parse(movie.sources.first())
++                val videoMetadata = movie.sources.firstOrNull { it.type != dev.jdtech.jellyfin.models.FindroidSourceType.UNKNOWN }
++                    ?.let { videoMetadataParser.parse(it) }
++                val similarItems = runCatching { repository.getSimilarItems(movieId) }.getOrDefault(emptyList())
+                 val actors = getActors(movie)
+                 val director = getDirector(movie)
+                 val writers = getWriters(movie)
+@@ -43,6 +45,7 @@ constructor(
+                 _state.emit(
+                     _state.value.copy(
+                         movie = movie,
++                        similarItems = similarItems,
+                         videoMetadata = videoMetadata,
+                         actors = actors,
+                         director = director,

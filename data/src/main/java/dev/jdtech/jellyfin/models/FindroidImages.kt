@@ -77,6 +77,7 @@ fun FindroidMovieDto.toLocalFindroidImages(itemId: UUID): FindroidImages {
     return FindroidImages(
         primary = Uri.Builder().appendEncodedPath("images/$itemId/primary").build(),
         backdrop = Uri.Builder().appendEncodedPath("images/$itemId/backdrop").build(),
+        logo = Uri.Builder().appendEncodedPath("images/$itemId/logo").build(),
     )
 }
 
@@ -84,6 +85,7 @@ fun FindroidShowDto.toLocalFindroidImages(itemId: UUID): FindroidImages {
     return FindroidImages(
         primary = Uri.Builder().appendEncodedPath("images/$itemId/primary").build(),
         backdrop = Uri.Builder().appendEncodedPath("images/$itemId/backdrop").build(),
+        logo = Uri.Builder().appendEncodedPath("images/$itemId/logo").build(),
     )
 }
 
@@ -91,6 +93,7 @@ fun FindroidSeasonDto.toLocalFindroidImages(itemId: UUID): FindroidImages {
     return FindroidImages(
         primary = Uri.Builder().appendEncodedPath("images/$itemId/primary").build(),
         backdrop = Uri.Builder().appendEncodedPath("images/$itemId/backdrop").build(),
+        logo = Uri.Builder().appendEncodedPath("images/$itemId/logo").build(),
         showPrimary = Uri.Builder().appendEncodedPath("images/$seriesId/primary").build(),
         showBackdrop = Uri.Builder().appendEncodedPath("images/$seriesId/backdrop").build(),
     )
@@ -100,6 +103,7 @@ fun FindroidEpisodeDto.toLocalFindroidImages(itemId: UUID): FindroidImages {
     return FindroidImages(
         primary = Uri.Builder().appendEncodedPath("images/$itemId/primary").build(),
         backdrop = Uri.Builder().appendEncodedPath("images/$itemId/backdrop").build(),
+        logo = Uri.Builder().appendEncodedPath("images/$itemId/logo").build(),
         showPrimary = Uri.Builder().appendEncodedPath("images/$seriesId/primary").build(),
         showBackdrop = Uri.Builder().appendEncodedPath("images/$seriesId/backdrop").build(),
     )

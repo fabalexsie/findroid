@@ -25,10 +25,11 @@ object RepositoryModule {
         serverDatabase: ServerDatabaseDao,
         appPreferences: AppPreferences,
         localFolderMediaResolver: dev.jdtech.jellyfin.repository.LocalFolderMediaResolver,
+        offlineRepository: JellyfinRepositoryOfflineImpl,
     ): JellyfinRepositoryImpl {
         println("Creating new jellyfinRepositoryImpl")
         return JellyfinRepositoryImpl(
-            application, jellyfinApi, serverDatabase, appPreferences, localFolderMediaResolver
+            application, jellyfinApi, serverDatabase, appPreferences, localFolderMediaResolver, offlineRepository
         )
     }
 

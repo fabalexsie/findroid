@@ -15,6 +15,13 @@ import dev.jdtech.jellyfin.models.FindroidShowDto
 import dev.jdtech.jellyfin.models.FindroidSourceDto
 import dev.jdtech.jellyfin.models.FindroidTrickplayInfoDto
 import dev.jdtech.jellyfin.models.FindroidUserDataDto
+import dev.jdtech.jellyfin.models.CachedJellyfinItemDto
+import dev.jdtech.jellyfin.models.CachedLibraryDto
+import dev.jdtech.jellyfin.models.CachedPersonDto
+import dev.jdtech.jellyfin.models.LibraryMediaDto
+import dev.jdtech.jellyfin.models.MediaGenreDto
+import dev.jdtech.jellyfin.models.MediaPersonDto
+import dev.jdtech.jellyfin.models.SimilarMediaDto
 import dev.jdtech.jellyfin.models.Server
 import dev.jdtech.jellyfin.models.ServerAddress
 import dev.jdtech.jellyfin.models.ServerWithAddressAndUser
@@ -91,7 +98,7 @@ interface ServerDatabaseDao {
     )
     suspend fun getServerCurrentAddress(serverId: String): ServerAddress?
 
-    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertMovie(movie: FindroidMovieDto)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertMovie(movie: FindroidMovieDto)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSource(source: FindroidSourceDto)
@@ -147,7 +154,7 @@ interface ServerDatabaseDao {
     @Query("SELECT * FROM movies WHERE serverId = :serverId ORDER BY name ASC")
     suspend fun getMoviesByServerId(serverId: String): List<FindroidMovieDto>
 
-    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertShow(show: FindroidShowDto)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertShow(show: FindroidShowDto)
 
     @Query("SELECT * FROM shows WHERE id = :id") suspend fun getShow(id: UUID): FindroidShowDto
 
@@ -158,7 +165,7 @@ interface ServerDatabaseDao {
 
     @Query("DELETE FROM shows WHERE id = :id") suspend fun deleteShow(id: UUID)
 
-    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSeason(show: FindroidSeasonDto)
 
     @Query("SELECT * FROM seasons WHERE id = :id")
@@ -169,7 +176,7 @@ interface ServerDatabaseDao {
 
     @Query("DELETE FROM seasons WHERE id = :id") suspend fun deleteSeason(id: UUID)
 
-    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEpisode(episode: FindroidEpisodeDto)
 
     @Query("SELECT * FROM episodes WHERE id = :id")
@@ -244,6 +251,108 @@ interface ServerDatabaseDao {
 
     @Query("SELECT * FROM episodes WHERE serverId = :serverId AND name LIKE '%' || :name || '%'")
     suspend fun searchEpisodes(serverId: String, name: String): List<FindroidEpisodeDto>
+
+
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCachedJellyfinItem(item: CachedJellyfinItemDto)
+
+    @Query("SELECT * FROM cachedJellyfinItems WHERE serverId = :serverId AND itemId = :itemId")
+    suspend fun getCachedJellyfinItem(serverId: String, itemId: UUID): CachedJellyfinItemDto?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCachedLibraries(items: List<CachedLibraryDto>)
+
+    @Query("DELETE FROM cachedLibraries WHERE serverId = :serverId")
+    suspend fun deleteCachedLibraries(serverId: String)
+
+    @Query("SELECT * FROM cachedLibraries WHERE serverId = :serverId ORDER BY name COLLATE NOCASE")
+    suspend fun getCachedLibraries(serverId: String): List<CachedLibraryDto>
+
+    @Query("SELECT * FROM mediaPeople WHERE serverId = :serverId AND personId = :personId LIMIT 1")
+    suspend fun getCachedPerson(serverId: String, personId: UUID): MediaPersonDto?
+
+    @Query("SELECT * FROM mediaPeople WHERE serverId = :serverId AND personId = :personId")
+    suspend fun getPersonCredits(serverId: String, personId: UUID): List<MediaPersonDto>
+
+    @Query("SELECT DISTINCT itemId FROM mediaPeople WHERE serverId = :serverId AND personId IN (:personIds)")
+    suspend fun getItemIdsForPeople(serverId: String, personIds: List<UUID>): List<UUID>
+
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertLibraryMedia(items: List<LibraryMediaDto>)
+
+    @Query("DELETE FROM libraryMedia WHERE serverId = :serverId AND libraryId = :libraryId")
+    suspend fun deleteLibraryMedia(serverId: String, libraryId: UUID)
+
+    @Query("SELECT itemId FROM libraryMedia WHERE serverId = :serverId AND libraryId = :libraryId")
+    suspend fun getLibraryMediaIds(serverId: String, libraryId: UUID): List<UUID>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCachedPerson(person: CachedPersonDto)
+
+    @Query("SELECT * FROM cachedPeople WHERE serverId = :serverId AND id = :personId")
+    suspend fun getCachedPersonDetails(serverId: String, personId: UUID): CachedPersonDto?
+
+    @Query("SELECT genre FROM mediaGenres WHERE serverId = :serverId AND itemId = :itemId ORDER BY genre COLLATE NOCASE")
+    suspend fun getGenresForItem(serverId: String, itemId: UUID): List<String>
+
+    @Query("SELECT * FROM seasons WHERE id IN (:ids)")
+    suspend fun getSeasonsByIds(ids: List<UUID>): List<FindroidSeasonDto>
+
+    @Query("SELECT * FROM seasons")
+    suspend fun getAllSeasons(): List<FindroidSeasonDto>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMediaGenres(genres: List<MediaGenreDto>)
+
+    @Query("DELETE FROM mediaGenres WHERE serverId = :serverId AND itemId = :itemId")
+    suspend fun deleteMediaGenres(serverId: String, itemId: UUID)
+
+    @Query("SELECT DISTINCT genre FROM mediaGenres WHERE serverId = :serverId ORDER BY genre COLLATE NOCASE")
+    suspend fun getGenres(serverId: String): List<String>
+
+    @Query("SELECT itemId FROM mediaGenres WHERE serverId = :serverId AND genre = :genre")
+    suspend fun getMediaIdsForGenre(serverId: String, genre: String): List<UUID>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSimilarMedia(items: List<SimilarMediaDto>)
+
+    @Query("DELETE FROM similarMedia WHERE serverId = :serverId AND itemId = :itemId")
+    suspend fun deleteSimilarMedia(serverId: String, itemId: UUID)
+
+    @Query("SELECT similarItemId FROM similarMedia WHERE serverId = :serverId AND itemId = :itemId ORDER BY sortOrder ASC")
+    suspend fun getSimilarMediaIds(serverId: String, itemId: UUID): List<UUID>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMediaPeople(items: List<MediaPersonDto>)
+
+    @Query("DELETE FROM mediaPeople WHERE serverId = :serverId AND itemId = :itemId")
+    suspend fun deleteMediaPeople(serverId: String, itemId: UUID)
+
+    @Query("SELECT * FROM mediaPeople WHERE serverId = :serverId AND itemId = :itemId ORDER BY name COLLATE NOCASE ASC")
+    suspend fun getMediaPeople(serverId: String, itemId: UUID): List<MediaPersonDto>
+
+    @Query("SELECT * FROM movies WHERE id = :id")
+    suspend fun findMovie(id: UUID): FindroidMovieDto?
+
+    @Query("SELECT * FROM shows WHERE id = :id")
+    suspend fun findShow(id: UUID): FindroidShowDto?
+
+    @Query("SELECT * FROM movies WHERE serverId = :serverId ORDER BY name COLLATE NOCASE")
+    suspend fun getAllMovies(serverId: String): List<FindroidMovieDto>
+
+    @Query("SELECT * FROM shows WHERE serverId = :serverId ORDER BY name COLLATE NOCASE")
+    suspend fun getAllShows(serverId: String): List<FindroidShowDto>
+
+    @Query("SELECT * FROM episodes WHERE serverId = :serverId ORDER BY seriesName COLLATE NOCASE, parentIndexNumber, indexNumber")
+    suspend fun getAllEpisodes(serverId: String): List<FindroidEpisodeDto>
+
+    @Query("SELECT * FROM movies WHERE serverId = :serverId AND id IN (:ids)")
+    suspend fun getMoviesByIds(serverId: String, ids: List<UUID>): List<FindroidMovieDto>
+
+    @Query("SELECT * FROM shows WHERE serverId = :serverId AND id IN (:ids)")
+    suspend fun getShowsByIds(serverId: String, ids: List<UUID>): List<FindroidShowDto>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTrickplayInfo(trickplayInfoDto: FindroidTrickplayInfoDto)

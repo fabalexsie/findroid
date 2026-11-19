@@ -63,4 +63,6 @@ suspend fun FindroidSourceDto.toFindroidSource(
 enum class FindroidSourceType {
     REMOTE,
     LOCAL,
+    /** A local folder scan could not be completed; this is never a playable source. */
+    UNKNOWN,
 }

@@ -9,6 +9,7 @@ data class HomeState(
     val resumeSection: HomeItem.Section? = null,
     val nextUpSection: HomeItem.Section? = null,
     val views: List<HomeItem.ViewItem> = emptyList(),
+    val genreSections: List<dev.jdtech.jellyfin.models.HomeSection> = emptyList(),
     val isLoading: Boolean = false,
     val error: Exception? = null,
 )

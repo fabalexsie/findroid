@@ -18,6 +18,13 @@ import dev.jdtech.jellyfin.models.FindroidShowDto
 import dev.jdtech.jellyfin.models.FindroidSourceDto
 import dev.jdtech.jellyfin.models.FindroidTrickplayInfoDto
 import dev.jdtech.jellyfin.models.FindroidUserDataDto
+import dev.jdtech.jellyfin.models.CachedJellyfinItemDto
+import dev.jdtech.jellyfin.models.CachedLibraryDto
+import dev.jdtech.jellyfin.models.CachedPersonDto
+import dev.jdtech.jellyfin.models.LibraryMediaDto
+import dev.jdtech.jellyfin.models.MediaGenreDto
+import dev.jdtech.jellyfin.models.MediaPersonDto
+import dev.jdtech.jellyfin.models.SimilarMediaDto
 import dev.jdtech.jellyfin.models.Server
 import dev.jdtech.jellyfin.models.ServerAddress
 import dev.jdtech.jellyfin.models.User
@@ -37,8 +44,15 @@ import dev.jdtech.jellyfin.models.User
             FindroidUserDataDto::class,
             FindroidTrickplayInfoDto::class,
             FindroidSegmentDto::class,
+            MediaGenreDto::class,
+            MediaPersonDto::class,
+            SimilarMediaDto::class,
+            CachedLibraryDto::class,
+            CachedPersonDto::class,
+            CachedJellyfinItemDto::class,
+            LibraryMediaDto::class,
         ],
-    version = 8,
+    version = 9,
     autoMigrations =
         [
             AutoMigration(from = 2, to = 3),
@@ -46,6 +60,7 @@ import dev.jdtech.jellyfin.models.User
             AutoMigration(from = 4, to = 5, spec = ServerDatabase.TrickplayMigration::class),
             AutoMigration(from = 5, to = 6, spec = ServerDatabase.IntrosMigration::class),
             AutoMigration(from = 7, to = 8),
+            AutoMigration(from = 8, to = 9),
         ],
 )
 @ColumnTypeConverters(Converters::class)

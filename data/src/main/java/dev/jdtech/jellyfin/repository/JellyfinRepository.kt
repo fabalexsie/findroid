@@ -71,6 +71,12 @@ interface JellyfinRepository {
 
     suspend fun getResumeItems(): List<FindroidItem>
 
+    suspend fun getGenreNames(): List<String>
+
+    suspend fun getGenreItems(genre: String): List<FindroidItem>
+
+    suspend fun getSimilarItems(itemId: UUID): List<FindroidItem>
+
     suspend fun getLatestMedia(parentId: UUID): List<FindroidItem>
 
     suspend fun getSeasons(seriesId: UUID, offline: Boolean = false): List<FindroidSeason>

@@ -9,6 +9,8 @@ import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.WorkManager
 import coil3.ImageLoader
 import coil3.PlatformContext
@@ -29,6 +31,7 @@ import javax.inject.Inject
 import kotlin.time.ExperimentalTime
 import okio.Path.Companion.toOkioPath
 import timber.log.Timber
+import java.util.concurrent.TimeUnit
 
 @HiltAndroidApp
 class BaseApplication : Application(), Configuration.Provider, SingletonImageLoader.Factory {
@@ -104,6 +107,16 @@ class BaseApplication : Application(), Configuration.Provider, SingletonImageLoa
             uniqueWorkName = "syncUserData",
             existingWorkPolicy = ExistingWorkPolicy.KEEP,
             request = syncWorkRequest,
+        )
+
+        val periodicSyncRequest =
+            PeriodicWorkRequestBuilder<SyncWorker>(12, TimeUnit.HOURS)
+                .setConstraints(constraints)
+                .build()
+        workManager.enqueueUniquePeriodicWork(
+            "syncLibraryAndUserData",
+            ExistingPeriodicWorkPolicy.KEEP,
+            periodicSyncRequest,
         )
     }
 

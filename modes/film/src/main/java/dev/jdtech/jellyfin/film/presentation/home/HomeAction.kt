@@ -8,6 +8,8 @@ sealed interface HomeAction {
 
     data class OnLibraryClick(val library: FindroidCollection) : HomeAction
 
+    data class OnGenreClick(val genre: String) : HomeAction
+
     data object OnRetryClick : HomeAction
 
     data object OnSearchClick : HomeAction

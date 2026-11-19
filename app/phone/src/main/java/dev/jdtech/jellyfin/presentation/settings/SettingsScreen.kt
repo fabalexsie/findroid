@@ -8,6 +8,12 @@ import androidx.annotation.StringRes
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import dev.jdtech.jellyfin.work.SyncWorker
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -161,6 +167,7 @@ private fun SettingsScreenLayout(
     onSelectLocalFolder: () -> Unit = {},
     onAction: (SettingsAction) -> Unit,
 ) {
+    val context = LocalContext.current
     val contentPadding = PaddingValues(all = MaterialTheme.spacings.default)
 
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
@@ -197,6 +204,28 @@ private fun SettingsScreenLayout(
                     modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
                 ) {
                     Text("Lokalen Medienordner auswählen")
+                }
+            }
+            item {
+                OutlinedButton(
+                    onClick = {
+                        val request =
+                            OneTimeWorkRequestBuilder<SyncWorker>()
+                                .setConstraints(
+                                    Constraints.Builder()
+                                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                                        .build()
+                                )
+                                .build()
+                        WorkManager.getInstance(context).enqueueUniqueWork(
+                            "manualLibrarySync",
+                            ExistingWorkPolicy.REPLACE,
+                            request,
+                        )
+                    },
+                    modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
+                ) {
+                    Text("Offline-Mediathek synchronisieren (WLAN)")
                 }
             }
             items(state.preferenceGroups) { group ->

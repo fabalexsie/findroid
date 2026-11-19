@@ -26,6 +26,8 @@ import dev.jdtech.jellyfin.core.presentation.dummy.dummyMovie
 import dev.jdtech.jellyfin.models.FindroidEpisode
 import dev.jdtech.jellyfin.models.FindroidItem
 import dev.jdtech.jellyfin.models.FindroidSeason
+import dev.jdtech.jellyfin.models.FindroidMovie
+import dev.jdtech.jellyfin.models.LocalMediaAvailability
 import dev.jdtech.jellyfin.models.isDownloaded
 import dev.jdtech.jellyfin.presentation.theme.FindroidTheme
 import dev.jdtech.jellyfin.presentation.theme.spacings
@@ -38,6 +40,8 @@ fun ItemCard(
     modifier: Modifier = Modifier,
     showSeriesName: Boolean = false,
 ) {
+    val mediaAvailability = item.localMediaAvailability
+    val isVideoItem = item is FindroidMovie || item is FindroidEpisode
     val width =
         when (direction) {
             Direction.HORIZONTAL -> 260
@@ -59,6 +63,8 @@ fun ItemCard(
                     horizontalArrangement = Arrangement.spacedBy(MaterialTheme.spacings.small),
                 ) {
                     if (item.isDownloaded()) DownloadedBadge()
+                    if (isVideoItem && mediaAvailability == LocalMediaAvailability.SERVER_ONLY) ServerOnlyBadge()
+                    if (isVideoItem && mediaAvailability == LocalMediaAvailability.UNKNOWN) UnknownAvailabilityBadge()
                     if (item.played) PlayedBadge()
                     item.unplayedItemCount?.takeIf { it > 0 }?.let { ItemCountBadge(it) }
                 }

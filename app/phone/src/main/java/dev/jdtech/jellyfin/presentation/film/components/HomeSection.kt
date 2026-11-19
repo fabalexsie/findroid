@@ -1,5 +1,6 @@
 package dev.jdtech.jellyfin.presentation.film.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,12 +27,16 @@ fun HomeSection(
     itemsPadding: PaddingValues,
     onAction: (HomeAction) -> Unit,
     modifier: Modifier = Modifier,
+    onTitleClick: (() -> Unit)? = null,
+    onItemClick: ((dev.jdtech.jellyfin.models.FindroidItem) -> Unit)? = null,
 ) {
     Column(modifier = modifier) {
         Box(modifier = Modifier.fillMaxWidth().height(42.dp).padding(itemsPadding)) {
             Text(
                 text = section.name.asString(),
-                modifier = Modifier.align(Alignment.CenterStart),
+                modifier = Modifier.align(Alignment.CenterStart).then(
+                    if (onTitleClick != null) Modifier.clickable(onClick = onTitleClick) else Modifier
+                ),
                 style = MaterialTheme.typography.titleMedium,
             )
         }
@@ -44,7 +49,10 @@ fun HomeSection(
                 ItemCard(
                     item = item,
                     direction = Direction.HORIZONTAL,
-                    onClick = { onAction(HomeAction.OnItemClick(item)) },
+                    onClick = {
+                        if (onItemClick != null) onItemClick(item)
+                        else onAction(HomeAction.OnItemClick(item))
+                    },
                 )
             }
         }

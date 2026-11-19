@@ -35,7 +35,9 @@ constructor(
         viewModelScope.launch {
             try {
                 val movie = repository.getMovie(movieId)
-                val videoMetadata = videoMetadataParser.parse(movie.sources.first())
+                val videoMetadata = movie.sources.firstOrNull { it.type != dev.jdtech.jellyfin.models.FindroidSourceType.UNKNOWN }
+                    ?.let { videoMetadataParser.parse(it) }
+                val similarItems = runCatching { repository.getSimilarItems(movieId) }.getOrDefault(emptyList())
                 val actors = getActors(movie)
                 val director = getDirector(movie)
                 val writers = getWriters(movie)
@@ -43,6 +45,7 @@ constructor(
                 _state.emit(
                     _state.value.copy(
                         movie = movie,
+                        similarItems = similarItems,
                         videoMetadata = videoMetadata,
                         actors = actors,
                         director = director,

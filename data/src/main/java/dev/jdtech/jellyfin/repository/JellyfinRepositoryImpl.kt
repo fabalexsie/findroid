@@ -15,6 +15,8 @@ import dev.jdtech.jellyfin.models.FindroidSeason
 import dev.jdtech.jellyfin.models.FindroidSegment
 import dev.jdtech.jellyfin.models.FindroidShow
 import dev.jdtech.jellyfin.models.FindroidSource
+import dev.jdtech.jellyfin.models.MediaGenreDto
+import dev.jdtech.jellyfin.models.SimilarMediaDto
 import dev.jdtech.jellyfin.models.SortBy
 import dev.jdtech.jellyfin.models.SortOrder
 import dev.jdtech.jellyfin.models.toFindroidCollection
@@ -61,6 +63,7 @@ class JellyfinRepositoryImpl(
     private val database: ServerDatabaseDao,
     private val appPreferences: AppPreferences,
     private val localFolderMediaResolver: LocalFolderMediaResolver,
+    private val offlineRepository: JellyfinRepositoryOfflineImpl,
 ) : JellyfinRepository {
     override suspend fun getPublicSystemInfo(): PublicSystemInfo =
         withContext(Dispatchers.IO) { jellyfinApi.systemApi.getPublicSystemInfo().content }
@@ -72,49 +75,91 @@ class JellyfinRepositoryImpl(
 
     override suspend fun getEpisode(itemId: UUID): FindroidEpisode =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getItem(itemId, jellyfinApi.userId!!)
-                .content
-                .toFindroidEpisode(this@JellyfinRepositoryImpl, database)!!
+            try {
+                val episode = jellyfinApi.libraryApi
+                    .getItem(itemId, jellyfinApi.userId!!)
+                    .content
+                    .toFindroidEpisode(this@JellyfinRepositoryImpl, database)!!
+                val resolution = localFolderMediaResolver.resolveWithStatus(itemId, episode.name)
+                episode.copy(
+                    sources = episode.sources + listOfNotNull(
+                        resolution.source ?: if (!resolution.scanCompleted) localFolderMediaResolver.unknownSource(itemId, episode.name) else null
+                    )
+                )
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading episode $itemId from the offline cache")
+                offlineRepository.getEpisode(itemId)
+            }
         }
 
     override suspend fun getMovie(itemId: UUID): FindroidMovie =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getItem(itemId, jellyfinApi.userId!!)
-                .content
-                .toFindroidMovie(this@JellyfinRepositoryImpl, database)
+            try {
+                val movie = jellyfinApi.libraryApi
+                    .getItem(itemId, jellyfinApi.userId!!)
+                    .content
+                    .toFindroidMovie(this@JellyfinRepositoryImpl, database)
+                val resolution = localFolderMediaResolver.resolveWithStatus(itemId, movie.name)
+                movie.copy(
+                    sources = movie.sources + listOfNotNull(
+                        resolution.source ?: if (!resolution.scanCompleted) localFolderMediaResolver.unknownSource(itemId, movie.name) else null
+                    )
+                )
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading movie $itemId from the offline cache")
+                offlineRepository.getMovie(itemId)
+            }
         }
 
     override suspend fun getShow(itemId: UUID): FindroidShow =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getItem(itemId, jellyfinApi.userId!!)
-                .content
-                .toFindroidShow(this@JellyfinRepositoryImpl)
+            try {
+                jellyfinApi.libraryApi
+                    .getItem(itemId, jellyfinApi.userId!!)
+                    .content
+                    .toFindroidShow(this@JellyfinRepositoryImpl)
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading series $itemId from the offline cache")
+                offlineRepository.getShow(itemId)
+            }
         }
 
     override suspend fun getSeason(itemId: UUID): FindroidSeason =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getItem(itemId, jellyfinApi.userId!!)
-                .content
-                .toFindroidSeason(this@JellyfinRepositoryImpl)
+            try {
+                jellyfinApi.libraryApi
+                    .getItem(itemId, jellyfinApi.userId!!)
+                    .content
+                    .toFindroidSeason(this@JellyfinRepositoryImpl)
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading season $itemId from the offline cache")
+                offlineRepository.getSeason(itemId)
+            }
         }
 
     override suspend fun getLibraries(): List<FindroidCollection> =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi.getItems(jellyfinApi.userId!!).content.items.mapNotNull {
-                it.toFindroidCollection(this@JellyfinRepositoryImpl)
+            try {
+                jellyfinApi.libraryApi.getItems(jellyfinApi.userId!!).content.items.mapNotNull {
+                    it.toFindroidCollection(this@JellyfinRepositoryImpl)
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; using cached libraries")
+                offlineRepository.getLibraries()
             }
         }
 
     override suspend fun getItem(itemId: UUID): FindroidItem? =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getItem(itemId = itemId, userId = jellyfinApi.userId!!)
-                .content
-                .toFindroidItem(this@JellyfinRepositoryImpl)
+            try {
+                jellyfinApi.libraryApi
+                    .getItem(itemId = itemId, userId = jellyfinApi.userId!!)
+                    .content
+                    .toFindroidItemWithAvailability()
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading item $itemId from the offline cache")
+                offlineRepository.getItem(itemId)
+            }
         }
 
     override suspend fun getItems(
@@ -127,20 +172,25 @@ class JellyfinRepositoryImpl(
         limit: Int?,
     ): List<FindroidItem> =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getItems(
-                    jellyfinApi.userId!!,
-                    parentId = parentId,
-                    includeItemTypes = includeTypes,
-                    recursive = recursive,
-                    sortBy = listOf(ItemSortBy.fromName(sortBy.sortString)),
-                    sortOrder = listOf(ItemSortOrder.fromName(sortOrder.sortString)),
-                    startIndex = startIndex,
-                    limit = limit,
-                )
-                .content
-                .items
-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
+            try {
+                jellyfinApi.libraryApi
+                    .getItems(
+                        jellyfinApi.userId!!,
+                        parentId = parentId,
+                        includeItemTypes = includeTypes,
+                        recursive = recursive,
+                        sortBy = listOf(ItemSortBy.fromName(sortBy.sortString)),
+                        sortOrder = listOf(ItemSortOrder.fromName(sortOrder.sortString)),
+                        startIndex = startIndex,
+                        limit = limit,
+                    )
+                    .content
+                    .items
+                    .mapNotNull { it.toFindroidItemWithAvailability() }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading cached media items")
+                offlineRepository.getItems(parentId, includeTypes, recursive, sortBy, sortOrder, startIndex, limit)
+            }
         }
 
     override suspend fun getItemsPaging(
@@ -161,10 +211,15 @@ class JellyfinRepositoryImpl(
 
     override suspend fun getPerson(personId: UUID): FindroidPerson =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getItem(personId, jellyfinApi.userId!!)
-                .content
-                .toFindroidPerson(this@JellyfinRepositoryImpl)
+            try {
+                jellyfinApi.libraryApi
+                    .getItem(personId, jellyfinApi.userId!!)
+                    .content
+                    .toFindroidPerson(this@JellyfinRepositoryImpl)
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading cached person $personId")
+                offlineRepository.getPerson(personId)
+            }
         }
 
     override suspend fun getPersonItems(
@@ -173,106 +228,234 @@ class JellyfinRepositoryImpl(
         recursive: Boolean,
     ): List<FindroidItem> =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getItems(
-                    jellyfinApi.userId!!,
-                    personIds = personIds,
-                    includeItemTypes = includeTypes,
-                    recursive = recursive,
-                )
-                .content
-                .items
-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
+            try {
+                jellyfinApi.libraryApi
+                    .getItems(
+                        jellyfinApi.userId!!,
+                        personIds = personIds,
+                        includeItemTypes = includeTypes,
+                        recursive = recursive,
+                    )
+                    .content
+                    .items
+                    .mapNotNull { it.toFindroidItemWithAvailability() }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading cached titles for person credits")
+                offlineRepository.getPersonItems(personIds, includeTypes, recursive)
+            }
         }
 
     override suspend fun getFavoriteItems(): List<FindroidItem> =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getItems(
-                    jellyfinApi.userId!!,
-                    filters = listOf(ItemFilter.IS_FAVORITE),
-                    includeItemTypes =
-                        listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES, BaseItemKind.EPISODE),
-                    recursive = true,
-                )
-                .content
-                .items
-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
+            try {
+                jellyfinApi.libraryApi
+                    .getItems(
+                        jellyfinApi.userId!!,
+                        filters = listOf(ItemFilter.IS_FAVORITE),
+                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES, BaseItemKind.EPISODE),
+                        recursive = true,
+                    )
+                    .content
+                    .items
+                    .mapNotNull { it.toFindroidItemWithAvailability() }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; using cached favorites")
+                offlineRepository.getFavoriteItems()
+            }
         }
 
     override suspend fun getSearchItems(query: String): List<FindroidItem> =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getItems(
-                    jellyfinApi.userId!!,
-                    searchTerm = query,
-                    includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
-                    recursive = true,
-                )
-                .content
-                .items
-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
+            try {
+                jellyfinApi.libraryApi
+                    .getItems(
+                        jellyfinApi.userId!!,
+                        searchTerm = query,
+                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
+                        recursive = true,
+                    )
+                    .content
+                    .items
+                    .mapNotNull { it.toFindroidItemWithAvailability() }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; searching cached media")
+                offlineRepository.getSearchItems(query)
+            }
         }
 
     override suspend fun getSuggestions(): List<FindroidItem> =
         withContext(Dispatchers.IO) {
-            jellyfinApi.suggestionApi
-                .getSuggestions(
-                    jellyfinApi.userId!!,
-                    limit = 6,
-                    type = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
+            try {
+                jellyfinApi.suggestionApi
+                    .getSuggestions(
+                        jellyfinApi.userId!!,
+                        limit = 6,
+                        type = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
+                    )
+                    .content
+                    .items
+                    .mapNotNull { it.toFindroidItemWithAvailability() }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; using cached suggestions")
+                offlineRepository.getSuggestions()
+            }
+        }
+
+    override suspend fun getGenreNames(): List<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                val serverId = appPreferences.getValue(appPreferences.currentServer)!!
+                val cachedGenres = database.getGenres(serverId)
+                if (cachedGenres.isNotEmpty()) return@withContext cachedGenres
+
+                // Populate the normalized genre index on the first home-screen visit.
+                var startIndex = 0
+                while (true) {
+                    val page = jellyfinApi.libraryApi.getItems(
+                        userId = jellyfinApi.userId!!,
+                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
+                        recursive = true,
+                        startIndex = startIndex,
+                        limit = 200,
+                        fields = listOf(ItemFields.GENRES),
+                    ).content
+                    if (page.items.isEmpty()) break
+                    page.items.forEach { item ->
+                        database.deleteMediaGenres(serverId, item.id)
+                        item.genres.orEmpty().distinct().filter(String::isNotBlank).takeIf { it.isNotEmpty() }?.let { genres ->
+                            database.insertMediaGenres(genres.map { MediaGenreDto(serverId, item.id, it) })
+                        }
+                    }
+                    startIndex += page.items.size
+                    if (page.items.size < 200 || startIndex >= page.totalRecordCount) break
+                }
+                database.getGenres(serverId)
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; using cached genres")
+                offlineRepository.getGenreNames()
+            }
+        }
+
+    override suspend fun getGenreItems(genre: String): List<FindroidItem> =
+        withContext(Dispatchers.IO) {
+            try {
+                val serverId = appPreferences.getValue(appPreferences.currentServer)!!
+                val ids = database.getMediaIdsForGenre(serverId, genre)
+                if (ids.isNotEmpty()) {
+                    ids.mapNotNull { id -> runCatching { getItem(id) }.getOrNull() }
+                        .filter { it is FindroidMovie || it is FindroidShow }
+                } else {
+                    jellyfinApi.libraryApi.getItems(
+                        userId = jellyfinApi.userId!!,
+                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
+                        recursive = true,
+                        genres = listOf(genre),
+                        fields = listOf(ItemFields.OVERVIEW, ItemFields.GENRES, ItemFields.PEOPLE),
+                    ).content.items.mapNotNull { it.toFindroidItemWithAvailability() }
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading cached genre $genre")
+                offlineRepository.getGenreItems(genre)
+            }
+        }
+
+    override suspend fun getSimilarItems(itemId: UUID): List<FindroidItem> =
+        withContext(Dispatchers.IO) {
+            try {
+                val userId = jellyfinApi.userId!!
+                val serverId = appPreferences.getValue(appPreferences.currentServer)!!
+                val items =
+                    jellyfinApi.libraryApi
+                        .getSimilarItems(
+                            itemId = itemId,
+                            userId = userId,
+                            limit = 20,
+                            fields = listOf(ItemFields.OVERVIEW, ItemFields.GENRES, ItemFields.PEOPLE),
+                        )
+                        .content
+                        .items
+                database.deleteSimilarMedia(serverId, itemId)
+                val recommendations = items.filter { it.type == BaseItemKind.MOVIE || it.type == BaseItemKind.SERIES }
+                database.insertSimilarMedia(
+                    recommendations.mapIndexedNotNull { index, item ->
+                        if (item.id == itemId) null else SimilarMediaDto(serverId, itemId, item.id, index)
+                    }
                 )
-                .content
-                .items
-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
+                recommendations.mapNotNull { it.toFindroidItemWithAvailability() }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading cached similar items for $itemId")
+                offlineRepository.getSimilarItems(itemId)
+            }
         }
 
     override suspend fun getResumeItems(): List<FindroidItem> =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getResumeItems(
-                    jellyfinApi.userId!!,
-                    limit = 12,
-                    includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.EPISODE),
-                )
-                .content
-                .items
-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
+            try {
+                jellyfinApi.libraryApi
+                    .getResumeItems(
+                        jellyfinApi.userId!!,
+                        limit = 12,
+                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.EPISODE),
+                    )
+                    .content
+                    .items
+                    .mapNotNull { it.toFindroidItemWithAvailability() }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; using cached resume items")
+                offlineRepository.getResumeItems()
+            }
         }
 
     override suspend fun getLatestMedia(parentId: UUID): List<FindroidItem> =
         withContext(Dispatchers.IO) {
-            jellyfinApi.libraryApi
-                .getLatestMedia(jellyfinApi.userId!!, parentId = parentId, limit = 16)
-                .content
-                .mapNotNull { it.toFindroidItem(this@JellyfinRepositoryImpl, database) }
+            try {
+                jellyfinApi.libraryApi
+                    .getLatestMedia(jellyfinApi.userId!!, parentId = parentId, limit = 16)
+                    .content
+                    .mapNotNull { it.toFindroidItemWithAvailability() }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading cached latest media for $parentId")
+                offlineRepository.getLatestMedia(parentId)
+            }
         }
 
     override suspend fun getSeasons(seriesId: UUID, offline: Boolean): List<FindroidSeason> =
         withContext(Dispatchers.IO) {
             if (!offline) {
-                jellyfinApi.showApi.getSeasons(seriesId, jellyfinApi.userId!!).content.items.map {
-                    it.toFindroidSeason(this@JellyfinRepositoryImpl)
+                try {
+                    jellyfinApi.showApi.getSeasons(seriesId, jellyfinApi.userId!!).content.items.map {
+                        it.toFindroidSeason(this@JellyfinRepositoryImpl)
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "Jellyfin unavailable; loading cached seasons for $seriesId")
+                    offlineRepository.getSeasons(seriesId, offline = true)
                 }
             } else {
-                database.getSeasonsByShowId(seriesId).map {
-                    it.toFindroidSeason(database, jellyfinApi.userId!!)
-                }
+                offlineRepository.getSeasons(seriesId, offline = true)
             }
         }
 
     override suspend fun getNextUp(seriesId: UUID?): List<FindroidEpisode> =
         withContext(Dispatchers.IO) {
-            jellyfinApi.showApi
-                .getNextUp(
-                    jellyfinApi.userId!!,
-                    limit = 24,
-                    seriesId = seriesId,
-                    enableResumable = false,
-                )
-                .content
-                .items
-                .mapNotNull { it.toFindroidEpisode(this@JellyfinRepositoryImpl) }
+            try {
+                jellyfinApi.showApi
+                    .getNextUp(
+                        jellyfinApi.userId!!,
+                        limit = 24,
+                        seriesId = seriesId,
+                        enableResumable = false,
+                    )
+                    .content
+                    .items
+                    .mapNotNull { episode ->
+                        episode.toFindroidEpisode(this@JellyfinRepositoryImpl)?.let { item ->
+                            item.withLocalFolderAvailability()
+                        }
+                    }
+            } catch (e: Exception) {
+                Timber.w(e, "Jellyfin unavailable; loading cached next-up episodes")
+                offlineRepository.getNextUp(seriesId)
+            }
         }
 
     override suspend fun getEpisodes(
@@ -285,22 +468,29 @@ class JellyfinRepositoryImpl(
     ): List<FindroidEpisode> =
         withContext(Dispatchers.IO) {
             if (!offline) {
-                jellyfinApi.showApi
-                    .getEpisodes(
-                        seriesId,
-                        jellyfinApi.userId!!,
-                        seasonId = seasonId,
-                        fields = fields,
-                        startItemId = startItemId,
-                        limit = limit,
-                    )
-                    .content
-                    .items
-                    .mapNotNull { it.toFindroidEpisode(this@JellyfinRepositoryImpl, database) }
-            } else {
-                database.getEpisodesBySeasonId(seasonId).map {
-                    it.toFindroidEpisode(database, jellyfinApi.userId!!)
+                try {
+                    jellyfinApi.showApi
+                        .getEpisodes(
+                            seriesId,
+                            jellyfinApi.userId!!,
+                            seasonId = seasonId,
+                            fields = fields,
+                            startItemId = startItemId,
+                            limit = limit,
+                        )
+                        .content
+                        .items
+                        .mapNotNull { episode ->
+                            episode.toFindroidEpisode(this@JellyfinRepositoryImpl, database)?.let { item ->
+                                item.withLocalFolderAvailability()
+                            }
+                        }
+                } catch (e: Exception) {
+                    Timber.w(e, "Jellyfin unavailable; loading cached episodes for season $seasonId")
+                    offlineRepository.getEpisodes(seriesId, seasonId, fields, startItemId, limit, offline = true)
                 }
+            } else {
+                offlineRepository.getEpisodes(seriesId, seasonId, fields, startItemId, limit, offline = true)
             }
         }
 
@@ -319,7 +509,7 @@ class JellyfinRepositoryImpl(
                     return@withContext listOf(it)
                 }
             }
-            sources.addAll(
+            val remoteSources = try {
                 jellyfinApi.mediaInfoApi
                     .getPostedPlaybackInfo(
                         itemId,
@@ -346,7 +536,11 @@ class JellyfinRepositoryImpl(
                     .content
                     .mediaSources
                     .map { it.toFindroidSource(this@JellyfinRepositoryImpl, itemId, includePath) }
-            )
+            } catch (e: Exception) {
+                Timber.w(e, "Unable to contact Jellyfin for playback sources of $itemId")
+                emptyList()
+            }
+            sources.addAll(remoteSources)
             sources.addAll(database.getSources(itemId).map { it.toFindroidSource(database) })
             sources
         }
@@ -583,5 +777,30 @@ class JellyfinRepositoryImpl(
 
     override fun getUserId(): UUID {
         return jellyfinApi.userId!!
+    }
+
+    private suspend fun BaseItemDto.toFindroidItemWithAvailability(): FindroidItem? =
+        this.toFindroidItem(this@JellyfinRepositoryImpl, database)?.let { item ->
+            when (item) {
+                is FindroidMovie -> item.withLocalFolderAvailability()
+                is FindroidEpisode -> item.withLocalFolderAvailability()
+                else -> item
+            }
+        }
+
+    private suspend fun FindroidMovie.withLocalFolderAvailability(): FindroidMovie {
+        val resolution = localFolderMediaResolver.resolveWithStatus(id, name)
+        val marker = resolution.source ?: if (!resolution.scanCompleted) {
+            localFolderMediaResolver.unknownSource(id, name)
+        } else null
+        return copy(sources = sources + listOfNotNull(marker))
+    }
+
+    private suspend fun FindroidEpisode.withLocalFolderAvailability(): FindroidEpisode {
+        val resolution = localFolderMediaResolver.resolveWithStatus(id, name)
+        val marker = resolution.source ?: if (!resolution.scanCompleted) {
+            localFolderMediaResolver.unknownSource(id, name)
+        } else null
+        return copy(sources = sources + listOfNotNull(marker))
     }
 }
